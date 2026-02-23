@@ -19,8 +19,14 @@ pip install -r requirements.txt
 
 ## Usage
 
-Run the analyzer:
+**Streamlit (recommended):**
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+Then open http://localhost:8501 in your browser.
 
+**CLI:**
 ```bash
 python main.py
 ```
@@ -38,6 +44,12 @@ Edit `config.py` to:
 - Add/remove stocks in `IDX_STOCKS`
 - Change thresholds: `OVERSOLD_THRESHOLD`, `OVERBOUGHT_THRESHOLD`, `SMI_BULLISH_THRESHOLD`
 - Adjust indicator periods: `STOCH_RSI_PERIOD`, `SMI_PERIOD`
+
+## Deploy on Render (Streamlit)
+
+1. Create a Web Service and connect your repo
+2. **Build Command:** `pip install -r requirements.txt`
+3. **Start Command:** `streamlit run streamlit_app.py --server.port=$PORT --server.address=0.0.0.0`
 
 ## Data Source
 
