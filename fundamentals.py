@@ -1,10 +1,11 @@
 """
 Fundamental and liquidity data via yfinance.
-PBV, PER, free float, profitability, cash flow.
+Covers: PBV, PER, ROE, ROA, ROIC, EPS, Free Cashflow,
+Solvency (D/E, Current Ratio), Revenue, Free Float.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import yfinance as yf
@@ -12,67 +13,144 @@ import yfinance as yf
 
 @dataclass
 class FundamentalSnapshot:
-    pbv: Optional[float] = None  # Price / Book
-    per: Optional[float] = None  # Price / Earnings
+    # Valuation
+    pbv: Optional[float] = None            # Price / Book Value
+    per: Optional[float] = None            # Price / Earnings (trailing)
+    per_forward: Optional[float] = None    # Forward PER
+    peg_ratio: Optional[float] = None      # PEG ratio
+
+    # Profitability
     revenue: Optional[float] = None
-    roe: Optional[float] = None
-    roa: Optional[float] = None
-    eps: Optional[float] = None
+    gross_margins: Optional[float] = None  # 0-1
+    operating_margins: Optional[float] = None
+    profit_margins: Optional[float] = None
+    roe: Optional[float] = None            # Return on Equity 0-1
+    roa: Optional[float] = None            # Return on Assets 0-1
+    roic: Optional[float] = None           # Return on Invested Capital (computed)
+    eps: Optional[float] = None            # Trailing EPS
+    eps_forward: Optional[float] = None    # Forward EPS
+    eps_growth: Optional[float] = None     # YoY EPS growth
+
+    # Cash Flow
     free_cashflow: Optional[float] = None
+    operating_cashflow: Optional[float] = None
+    capex: Optional[float] = None
+
+    # Solvency / Leverage
+    total_debt: Optional[float] = None
+    total_cash: Optional[float] = None
     debt_to_equity: Optional[float] = None
-    free_float_ratio: Optional[float] = None  # 0-1
+    current_ratio: Optional[float] = None
+    quick_ratio: Optional[float] = None
+
+    # Liquidity
+    free_float_ratio: Optional[float] = None   # 0-1
+    avg_volume_10d: Optional[float] = None
+    market_cap: Optional[float] = None
+    enterprise_value: Optional[float] = None
+
+    # Dividend
+    dividend_yield: Optional[float] = None
 
 
-def _safe_ratio(num: Optional[float], den: Optional[float]) -> Optional[float]:
+def _safe_div(num: Optional[float], den: Optional[float]) -> Optional[float]:
     if num is None or den in (None, 0):
         return None
     return num / den
 
 
 def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
-    """
-    Fetch key fundamentals from Yahoo Finance via yfinance.
-    Fields are best-effort (some tickers may miss data).
-    """
     t = yf.Ticker(ticker)
     try:
         info = t.get_info()
     except Exception:
-        # Fall back to deprecated .info if necessary
         try:
             info = t.info
         except Exception:
             info = {}
 
-    # yfinance can sometimes return None here; normalise to dict
     if not isinstance(info, dict):
         info = {}
 
+    # Valuation
     pbv = info.get("priceToBook")
-    per = info.get("trailingPE") or info.get("forwardPE")
+    per = info.get("trailingPE")
+    per_forward = info.get("forwardPE")
+    peg = info.get("pegRatio") or info.get("trailingPegRatio")
+
+    # Profitability
     revenue = info.get("totalRevenue")
+    gross_margins = info.get("grossMargins")
+    op_margins = info.get("operatingMargins")
+    profit_margins = info.get("profitMargins")
     roe = info.get("returnOnEquity")
     roa = info.get("returnOnAssets")
-    eps = info.get("trailingEps") or info.get("forwardEps")
-    free_cashflow = info.get("freeCashflow") or info.get("operatingCashflow")
+    eps = info.get("trailingEps")
+    eps_fwd = info.get("forwardEps")
 
+    # Rough ROIC = EBIT*(1-tax) / (Debt + Equity)
+    ebit = info.get("ebit")
+    tax_rate = info.get("effectiveTaxRate") or 0.22
+    invested_capital = (info.get("totalDebt") or 0) + (info.get("totalStockholderEquity") or 0)
+    roic: Optional[float] = None
+    if ebit and invested_capital:
+        roic = ebit * (1 - tax_rate) / invested_capital
+
+    # EPS Growth (yoy)
+    eps_growth: Optional[float] = None
+    if eps and eps_fwd and eps != 0:
+        eps_growth = (eps_fwd - eps) / abs(eps)
+
+    # Cash flow
+    fcf = info.get("freeCashflow")
+    opcf = info.get("operatingCashflow")
+    capex: Optional[float] = None
+    if fcf is not None and opcf is not None:
+        capex = opcf - fcf
+
+    # Solvency
     total_debt = info.get("totalDebt")
+    total_cash = info.get("totalCash")
     equity = info.get("totalStockholderEquity")
-    debt_to_equity = _safe_ratio(total_debt, equity)
+    de = _safe_div(total_debt, equity)
+    current_ratio = info.get("currentRatio")
+    quick_ratio = info.get("quickRatio")
 
+    # Liquidity
     float_shares = info.get("floatShares")
     shares_out = info.get("sharesOutstanding")
-    free_float_ratio = _safe_ratio(float_shares, shares_out)
+    free_float_ratio = _safe_div(float_shares, shares_out)
+    avg_vol = info.get("averageVolume10days") or info.get("averageVolume")
+    mkt_cap = info.get("marketCap")
+    ev = info.get("enterpriseValue")
+    div_yield = info.get("dividendYield")
 
     return FundamentalSnapshot(
         pbv=pbv,
         per=per,
+        per_forward=per_forward,
+        peg_ratio=peg,
         revenue=revenue,
+        gross_margins=gross_margins,
+        operating_margins=op_margins,
+        profit_margins=profit_margins,
         roe=roe,
         roa=roa,
+        roic=roic,
         eps=eps,
-        free_cashflow=free_cashflow,
-        debt_to_equity=debt_to_equity,
+        eps_forward=eps_fwd,
+        eps_growth=eps_growth,
+        free_cashflow=fcf,
+        operating_cashflow=opcf,
+        capex=capex,
+        total_debt=total_debt,
+        total_cash=total_cash,
+        debt_to_equity=de,
+        current_ratio=current_ratio,
+        quick_ratio=quick_ratio,
         free_float_ratio=free_float_ratio,
+        avg_volume_10d=avg_vol,
+        market_cap=mkt_cap,
+        enterprise_value=ev,
+        dividend_yield=div_yield,
     )
-
