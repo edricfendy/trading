@@ -39,7 +39,10 @@ with st.sidebar:
         st.rerun()
 
 if universe_mode == "All IDX stocks":
-    tickers = get_universe(all_idx=True)
+    # Limit to first 50 to avoid yfinance rate limits
+    all_tickers = get_universe(all_idx=True)
+    tickers = all_tickers[:50]
+    st.sidebar.write(f"Scanning {len(tickers)} out of {len(all_tickers)} IDX stocks (first 50).")
 else:
     tickers = list(IDX_STOCKS)
 
