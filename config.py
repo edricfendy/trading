@@ -11,7 +11,36 @@ from typing import List, Optional, Set
 
 import requests
 
-from config import IDX_STOCKS
+# Core LQ45 / large-cap Indonesia stocks (used when all_idx=False)
+IDX_STOCKS = [
+    "BBCA.JK", "BBRI.JK", "BMRI.JK", "BBNI.JK", "BBTN.JK", "TLKM.JK",
+    "ASII.JK", "UNVR.JK", "ICBP.JK", "INDF.JK", "HMSP.JK", "GGRM.JK",
+    "KLBF.JK", "PGAS.JK", "PTBA.JK", "ADRO.JK", "ANTM.JK", "MEDC.JK",
+    "UNTR.JK", "JSMR.JK", "AKRA.JK", "MAPI.JK", "CPIN.JK", "BRIS.JK",
+    "EXCL.JK", "TINS.JK",
+]
+
+# Signal thresholds
+OVERSOLD_THRESHOLD = 20
+OVERBOUGHT_THRESHOLD = 80
+SMI_BULLISH_THRESHOLD = 0.5
+
+# Indicator periods
+STOCH_RSI_PERIOD = 14
+STOCH_RSI_K = 3
+STOCH_RSI_D = 3
+SMI_PERIOD = 14
+
+
+def get_data_period(interval: str = "1d") -> str:
+    """
+    Return a sensible yfinance period for the given interval.
+    Intraday intervals are limited; daily+ can use longer history.
+    """
+    intraday = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}
+    if interval in intraday:
+        return "5d"
+    return "3mo"
 
 # IDX API endpoint (more reliable than scraping)
 IDX_API_URL = "https://www.idx.co.id/primary/StockData/GetSecurities?start=0&length=9999&code=&name=&market=REGULER&sector=&type=s&board=&tradingUnit=&shares=&listingDate=&currency=&assetValue="
@@ -140,5 +169,4 @@ def get_universe(all_idx: bool = True, limit: Optional[int] = None) -> list[str]
     """
     if all_idx:
         return fetch_all_idx_tickers(max_count=limit)
-    from config import IDX_STOCKS
     return list(IDX_STOCKS)
