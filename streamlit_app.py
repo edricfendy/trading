@@ -45,7 +45,18 @@ with st.sidebar:
         step=10,
         help="Limit for 'All IDX' mode to avoid rate limits",
     )
+    scan_all = False
+    if "All IDX" in universe_mode:
+        scan_all = st.checkbox(
+            "Scan all IDX stocks (slow, may rate limit)",
+            value=False,
+        )
     min_rebound = st.slider("Rebound Min Score", 20, 80, 40)
+    view_mode = st.radio(
+        "View",
+        ["By Action", "By Sector/Industry"],
+        index=0,
+    )
     group_mode = st.selectbox(
         "Group signals by",
         ["None", "Sector", "Industry"],
@@ -75,7 +86,7 @@ with st.sidebar:
 # ─── Ticker selection ─────────────────────────────────────────────────────────
 if "All IDX" in universe_mode:
     all_tickers = get_universe(all_idx=True)
-    tickers = all_tickers[:batch_limit]
+    tickers = all_tickers if scan_all else all_tickers[:batch_limit]
     st.sidebar.write(f"Scanning {len(tickers)} of {len(all_tickers)} IDX stocks.")
 else:
     tickers = list(IDX_STOCKS)
@@ -246,31 +257,36 @@ c2.metric("🔴 SELL", len(sell_signals))
 c3.metric("⚪ HOLD", len(hold_signals))
 c4.metric("🔁 Rebound Candidates", len(rebounds))
 
-# ─── BUY ──────────────────────────────────────────────────────────────────────
-if buy_signals:
-    st.header("🟢 Buy Opportunities")
-    with st.expander("🏦 Long-Term (Undervalued)", expanded=True):
-        lt = [s for s in buy_signals if s.horizon == "long-term"]
-        if lt:
-            render_signals(lt, group_mode)
-        else:
-            st.info("No long-term undervalued buys at this time.")
-    with st.expander("⚡ Short-Term / Momentum", expanded=True):
-        st_ = [s for s in buy_signals if s.horizon in ("short-term", "speculative", "balanced", "neutral")]
-        if st_:
-            render_signals(st_, group_mode)
-        else:
-            st.info("No short-term momentum buys at this time.")
+# ─── Signals View ─────────────────────────────────────────────────────────────
+if view_mode == "By Sector/Industry":
+    st.header("🗂️ All Signals Grouped")
+    render_signals(signals, group_mode)
+else:
+    # ─── BUY ──────────────────────────────────────────────────────────────────
+    if buy_signals:
+        st.header("🟢 Buy Opportunities")
+        with st.expander("🏦 Long-Term (Undervalued)", expanded=True):
+            lt = [s for s in buy_signals if s.horizon == "long-term"]
+            if lt:
+                render_signals(lt, group_mode)
+            else:
+                st.info("No long-term undervalued buys at this time.")
+        with st.expander("⚡ Short-Term / Momentum", expanded=True):
+            st_ = [s for s in buy_signals if s.horizon in ("short-term", "speculative", "balanced", "neutral")]
+            if st_:
+                render_signals(st_, group_mode)
+            else:
+                st.info("No short-term momentum buys at this time.")
 
-# ─── SELL ─────────────────────────────────────────────────────────────────────
-if sell_signals:
-    st.header("🔴 Sell Signals")
-    render_signals(sell_signals, group_mode)
+    # ─── SELL ─────────────────────────────────────────────────────────────────
+    if sell_signals:
+        st.header("🔴 Sell Signals")
+        render_signals(sell_signals, group_mode)
 
-# ─── HOLD ─────────────────────────────────────────────────────────────────────
-if hold_signals:
-    with st.expander("⚪ Hold / No Strong Signal (first 15)", expanded=False):
-        render_signals(hold_signals[:15], group_mode)
+    # ─── HOLD ─────────────────────────────────────────────────────────────────
+    if hold_signals:
+        with st.expander("⚪ Hold / No Strong Signal (first 15)", expanded=False):
+            render_signals(hold_signals[:15], group_mode)
 
 # ─── REBOUND ──────────────────────────────────────────────────────────────────
 st.header("🔁 Potential Rebound Candidates")
