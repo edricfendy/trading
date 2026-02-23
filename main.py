@@ -18,6 +18,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
 from tabulate import tabulate
 from datetime import datetime
 from analyzer import get_all_signals, screen_rebound_candidates, TimingSignal, ReboundCandidate
+from yfinance.exceptions import YFRateLimitError
 
 
 def format_signals(signals: list[TimingSignal]) -> str:
@@ -107,4 +108,7 @@ def run_analysis():
 
 
 if __name__ == "__main__":
-    run_analysis()
+    try:
+        run_analysis()
+    except YFRateLimitError:
+        print("Yahoo Finance rate limit reached. Reduce tickers or retry in a few minutes.")

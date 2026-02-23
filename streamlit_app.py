@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 import warnings
 from datetime import datetime
+from yfinance.exceptions import YFRateLimitError
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -85,12 +86,17 @@ def run_rebounds(ticker_tuple, min_score):
     return screen_rebound_candidates(tickers=list(ticker_tuple), min_score=min_score)
 
 
-with st.spinner("⏳ Loading stock data and running analysis (this may take a minute)..."):
-    signals = run_signals(tuple(tickers))
-    buy_signals  = [s for s in signals if s.action == "BUY"]
-    sell_signals = [s for s in signals if s.action == "SELL"]
-    hold_signals = [s for s in signals if s.action == "HOLD"]
-    rebounds = run_rebounds(tuple(tickers), min_rebound)
+try:
+    with st.spinner("⏳ Loading stock data and running analysis (this may take a minute)..."):
+        signals = run_signals(tuple(tickers))
+        buy_signals  = [s for s in signals if s.action == "BUY"]
+        sell_signals = [s for s in signals if s.action == "SELL"]
+        hold_signals = [s for s in signals if s.action == "HOLD"]
+        rebounds = run_rebounds(tuple(tickers), min_rebound)
+except YFRateLimitError:
+    st.error("Yahoo Finance rate limit reached. Please wait and try again.")
+    st.info("Tips: reduce 'Max stocks to scan', switch to LQ45/core list, or retry in a few minutes.")
+    st.stop()
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
