@@ -1,5 +1,5 @@
 """
-Technical Indicators: Stochastic RSI, Smart Money Accumulation
+Technical Indicators: Stochastic RSI, Smart Money, MACD, ROC, Support/Resistance
 """
 import pandas as pd
 import numpy as np
@@ -19,13 +19,15 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return rsi_val
 
 
-def stochastic_rsi(close: pd.Series, rsi_period: int = 14, k_period: int = 3, d_period: int = 3) -> Tuple[pd.Series, pd.Series]:
+def stochastic_rsi(
+    close: pd.Series,
+    rsi_period: int = 14,
+    k_period: int = 3,
+    d_period: int = 3,
+) -> Tuple[pd.Series, pd.Series]:
     """
     Calculate Stochastic RSI.
     Returns (stoch_rsi_k, stoch_rsi_d)
-    - %K: RSI value relative to its min/max range, smoothed
-    - %D: SMA of %K
-    Oversold: %K < 20, Overbought: %K > 80
     """
     rsi_val = rsi(close, period=rsi_period)
     rsi_min = rsi_val.rolling(window=k_period).min()
@@ -36,13 +38,37 @@ def stochastic_rsi(close: pd.Series, rsi_period: int = 14, k_period: int = 3, d_
     return stoch_k, stoch_d
 
 
+def macd(
+    close: pd.Series,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    MACD indicator.
+    Returns (macd_line, signal_line, histogram)
+    """
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
+def rate_of_change(close: pd.Series, period: int = 12) -> pd.Series:
+    """Percentage Rate of Change"""
+    shifted = close.shift(period)
+    roc = (close - shifted) / shifted.replace(0, np.nan) * 100
+    return roc
+
+
 def smart_money_index(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """
     Smart Money Index (SMI) / Accumulation indicator.
     Measures institutional/smart money flow:
-    SMI = cumulative sum of [(Close - Open) / (High - Low)] * Volume
-    Normalized variant for comparison across stocks.
-    Positive SMI = smart money accumulating (bullish)
+    SMI = rolling sum of [(Close - Open) / (High - Low)] * Volume
+    Normalized (z-score style) for cross-stock comparison.
     """
     high = df["high"]
     low = df["low"]
@@ -52,8 +78,9 @@ def smart_money_index(df: pd.DataFrame, period: int = 14) -> pd.Series:
     hl_range = (high - low).replace(0, np.nan)
     smi_raw = ((close - open_) / hl_range) * volume
     smi = smi_raw.rolling(window=period).sum()
-    # Normalize for scale (z-score like for cross-stock comparison)
-    smi_norm = (smi - smi.rolling(period * 2).mean()) / (smi.rolling(period * 2).std().replace(0, np.nan) + 1e-8)
+    mean = smi.rolling(period * 2).mean()
+    std = smi.rolling(period * 2).std().replace(0, np.nan)
+    smi_norm = (smi - mean) / (std + 1e-8)
     return smi_norm
 
 
@@ -68,8 +95,20 @@ def smart_money_accumulation(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return acc
 
 
+def support_resistance(
+    close: pd.Series,
+    window: int = 20,
+) -> Tuple[pd.Series, pd.Series]:
+    """
+    Simple support/resistance from rolling lows/highs.
+    """
+    support = close.rolling(window=window).min()
+    resistance = close.rolling(window=window).max()
+    return support, resistance
+
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Add Stochastic RSI and Smart Money indicators to OHLCV DataFrame"""
+    """Add TA indicators to OHLCV DataFrame"""
     df = df.copy()
     stoch_k, stoch_d = stochastic_rsi(
         df["close"],
@@ -77,10 +116,22 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         k_period=STOCH_RSI_K,
         d_period=STOCH_RSI_D,
     )
+    macd_line, macd_signal, macd_hist = macd(df["close"])
+    roc_12 = rate_of_change(df["close"], period=12)
+    roc_24 = rate_of_change(df["close"], period=24)
+    supp, resist = support_resistance(df["close"], window=20)
+
     df = df.assign(
         stoch_rsi_k=stoch_k,
         stoch_rsi_d=stoch_d,
         smi=smart_money_index(df, period=SMI_PERIOD),
         smi_acc=smart_money_accumulation(df, period=SMI_PERIOD),
+        macd_line=macd_line,
+        macd_signal=macd_signal,
+        macd_hist=macd_hist,
+        roc_12=roc_12,
+        roc_24=roc_24,
+        support_20=supp,
+        resistance_20=resist,
     )
     return df

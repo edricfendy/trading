@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional
 from config import IDX_STOCKS, get_data_period
+from universe import get_universe
 
 
 def fetch_stock_data(
@@ -29,13 +30,19 @@ def fetch_multiple_stocks(
     tickers: Optional[list[str]] = None,
     period: str = "3mo",
     interval: str = "1d",
+    all_idx: bool = True,
 ) -> dict[str, pd.DataFrame]:
     """
     Fetch data for multiple Indonesia stocks.
+    If tickers is None, uses:
+      - all_idx=True: dynamic full IDX universe (fallback to IDX_STOCKS)
+      - all_idx=False: static IDX_STOCKS list only
     Returns dict of {ticker: DataFrame}
     """
-    tickers = tickers or IDX_STOCKS
-    results = {}
+    if tickers is None:
+        tickers = get_universe(all_idx=all_idx)
+
+    results: dict[str, pd.DataFrame] = {}
     for t in tickers:
         df = fetch_stock_data(t, period=period, interval=interval)
         if not df.empty:

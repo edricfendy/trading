@@ -8,7 +8,14 @@ from datetime import datetime
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-from analyzer import get_all_signals, screen_rebound_candidates, TimingSignal, ReboundCandidate
+from analyzer import (
+    get_all_signals,
+    screen_rebound_candidates,
+    TimingSignal,
+    ReboundCandidate,
+)
+from universe import get_universe
+from config import IDX_STOCKS
 
 st.set_page_config(
     page_title="Indonesia Stock Trading AI",
@@ -22,17 +29,27 @@ st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} • Stochas
 # Sidebar
 with st.sidebar:
     st.header("Settings")
+    universe_mode = st.radio(
+        "Universe",
+        ["All IDX stocks", "LQ45 / core list"],
+        index=0,
+    )
     min_rebound = st.slider("Rebound Min Score", 20, 80, 40)
     if st.button("🔄 Refresh Analysis"):
         st.rerun()
 
+if universe_mode == "All IDX stocks":
+    tickers = get_universe(all_idx=True)
+else:
+    tickers = list(IDX_STOCKS)
+
 # Run analysis
 with st.spinner("Loading stock data and running analysis..."):
-    signals = get_all_signals()
+    signals = get_all_signals(tickers=tickers)
     buy_signals = [s for s in signals if s.action == "BUY"]
     sell_signals = [s for s in signals if s.action == "SELL"]
     hold_signals = [s for s in signals if s.action == "HOLD"]
-    rebounds = screen_rebound_candidates(min_score=min_rebound)
+    rebounds = screen_rebound_candidates(tickers=tickers, min_score=min_rebound)
 
 
 def signals_to_df(signals_list: list[TimingSignal]) -> pd.DataFrame:
@@ -40,14 +57,28 @@ def signals_to_df(signals_list: list[TimingSignal]) -> pd.DataFrame:
     for s in signals_list:
         stoch = f"{s.stoch_rsi_k:.1f}" if s.stoch_rsi_k is not None else "-"
         smi = f"{s.smi:.2f}" if s.smi is not None else "-"
+        pbv = f"{s.pbv:.2f}" if s.pbv is not None else "-"
+        per = f"{s.per:.1f}" if s.per is not None else "-"
+        roe = f"{s.roe * 100:.1f}%" if s.roe is not None else "-"
+        ff = f"{s.free_float_ratio * 100:.1f}%" if s.free_float_ratio is not None else "-"
+        tp = f"{s.take_profit:,.0f}" if s.take_profit is not None else "-"
+        sl = f"{s.stop_loss:,.0f}" if s.stop_loss is not None else "-"
         rows.append({
             "Ticker": s.ticker,
             "Action": s.action,
+            "Horizon": s.horizon,
             "Confidence": f"{s.confidence:.0%}",
             "Stoch RSI": stoch,
             "SMI": smi,
+            "MACD": s.macd_trend or "-",
+            "PBV": pbv,
+            "PER": per,
+            "ROE": roe,
+            "Free Float": ff,
             "Price (Rp)": f"{s.price:,.0f}",
-            "Reason": s.reason[:80] + "..." if len(s.reason) > 80 else s.reason,
+            "TP (Rp)": tp,
+            "SL (Rp)": sl,
+            "Reason": s.reason[:120] + "..." if len(s.reason) > 120 else s.reason,
         })
     return pd.DataFrame(rows)
 
