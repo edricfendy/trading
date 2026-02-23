@@ -56,6 +56,8 @@ class TimingSignal:
     free_float_ratio: Optional[float]
     market_cap: Optional[float]
     valuation_label: str
+    sector: Optional[str]
+    industry: Optional[str]
     # Levels
     take_profit: Optional[float]
     stop_loss: Optional[float]
@@ -197,6 +199,7 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
             revenue=None, debt_to_equity=None, current_ratio=None,
             gross_margins=None, profit_margins=None, dividend_yield=None,
             free_float_ratio=None, market_cap=None, valuation_label="unknown",
+            sector=None, industry=None,
             take_profit=None, stop_loss=None, price=0.0, timestamp=now,
         )
 
@@ -418,6 +421,7 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
         profit_margins=f.profit_margins, dividend_yield=f.dividend_yield,
         free_float_ratio=f.free_float_ratio, market_cap=f.market_cap,
         valuation_label=label,
+        sector=f.sector, industry=f.industry,
         take_profit=tp, stop_loss=sl,
         price=price,
         timestamp=latest.name.isoformat() if hasattr(latest.name, "isoformat") else str(latest.name),

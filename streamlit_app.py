@@ -46,6 +46,11 @@ with st.sidebar:
         help="Limit for 'All IDX' mode to avoid rate limits",
     )
     min_rebound = st.slider("Rebound Min Score", 20, 80, 40)
+    group_mode = st.selectbox(
+        "Group signals by",
+        ["None", "Sector", "Industry"],
+        index=1,
+    )
     st.markdown("---")
     st.info(
         "**Indicators used:**\n"
@@ -142,6 +147,8 @@ def signals_to_df(sig_list: list[TimingSignal]) -> pd.DataFrame:
             "Conf": f"{s.confidence:.0%}",
             "Horizon": f"{horizon_emoji} {s.horizon}",
             "Valuation": s.valuation_label,
+            "Sector": s.sector or "-",
+            "Industry": s.industry or "-",
             # TA
             "StochRSI": _fmt(s.stoch_rsi_k, ".1f"),
             "RSI": _fmt(s.rsi, ".1f"),
@@ -190,6 +197,31 @@ def signals_to_df(sig_list: list[TimingSignal]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _group_signals(sig_list: list[TimingSignal], mode: str) -> dict[str, list[TimingSignal]]:
+    if mode == "None":
+        return {"All": sig_list}
+    groups: dict[str, list[TimingSignal]] = {}
+    for s in sig_list:
+        if mode == "Industry":
+            key = s.industry or s.sector or "Unknown"
+        else:
+            key = s.sector or "Unknown"
+        groups.setdefault(key, []).append(s)
+    return dict(sorted(groups.items(), key=lambda x: x[0]))
+
+
+def render_signals(sig_list: list[TimingSignal], group: str):
+    if not sig_list:
+        return
+    if group == "None":
+        st.dataframe(signals_to_df(sig_list), use_container_width=True, hide_index=True)
+        return
+    grouped = _group_signals(sig_list, group)
+    for label, items in grouped.items():
+        st.markdown(f"**{label} ({len(items)})**")
+        st.dataframe(signals_to_df(items), use_container_width=True, hide_index=True)
+
+
 def rebounds_to_df(candidates: list[ReboundCandidate]) -> pd.DataFrame:
     rows = []
     for c in candidates[:20]:
@@ -220,25 +252,25 @@ if buy_signals:
     with st.expander("🏦 Long-Term (Undervalued)", expanded=True):
         lt = [s for s in buy_signals if s.horizon == "long-term"]
         if lt:
-            st.dataframe(signals_to_df(lt), use_container_width=True, hide_index=True)
+            render_signals(lt, group_mode)
         else:
             st.info("No long-term undervalued buys at this time.")
     with st.expander("⚡ Short-Term / Momentum", expanded=True):
         st_ = [s for s in buy_signals if s.horizon in ("short-term", "speculative", "balanced", "neutral")]
         if st_:
-            st.dataframe(signals_to_df(st_), use_container_width=True, hide_index=True)
+            render_signals(st_, group_mode)
         else:
             st.info("No short-term momentum buys at this time.")
 
 # ─── SELL ─────────────────────────────────────────────────────────────────────
 if sell_signals:
     st.header("🔴 Sell Signals")
-    st.dataframe(signals_to_df(sell_signals), use_container_width=True, hide_index=True)
+    render_signals(sell_signals, group_mode)
 
 # ─── HOLD ─────────────────────────────────────────────────────────────────────
 if hold_signals:
     with st.expander("⚪ Hold / No Strong Signal (first 15)", expanded=False):
-        st.dataframe(signals_to_df(hold_signals[:15]), use_container_width=True, hide_index=True)
+        render_signals(hold_signals[:15], group_mode)
 
 # ─── REBOUND ──────────────────────────────────────────────────────────────────
 st.header("🔁 Potential Rebound Candidates")

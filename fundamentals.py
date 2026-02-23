@@ -51,6 +51,9 @@ class FundamentalSnapshot:
 
     # Dividend
     dividend_yield: Optional[float] = None
+    # Classification
+    sector: Optional[str] = None
+    industry: Optional[str] = None
 
 
 def _safe_div(num: Optional[float], den: Optional[float]) -> Optional[float]:
@@ -125,6 +128,10 @@ def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
     ev = info.get("enterpriseValue")
     div_yield = info.get("dividendYield")
 
+    # Classification
+    sector = info.get("sector") or info.get("sectorDisp")
+    industry = info.get("industry") or info.get("industryDisp")
+
     return FundamentalSnapshot(
         pbv=pbv,
         per=per,
@@ -153,4 +160,6 @@ def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
         market_cap=mkt_cap,
         enterprise_value=ev,
         dividend_yield=div_yield,
+        sector=sector,
+        industry=industry,
     )
