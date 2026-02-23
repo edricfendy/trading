@@ -44,6 +44,10 @@ def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
         except Exception:
             info = {}
 
+    # yfinance can sometimes return None here; normalise to dict
+    if not isinstance(info, dict):
+        info = {}
+
     pbv = info.get("priceToBook")
     per = info.get("trailingPE") or info.get("forwardPE")
     revenue = info.get("totalRevenue")
