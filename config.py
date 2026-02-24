@@ -7,6 +7,7 @@ a comprehensive static list of ~800+ IDX stocks.
 from __future__ import annotations
 
 import json
+import os
 from typing import List, Optional, Set
 
 import requests
@@ -19,6 +20,15 @@ IDX_STOCKS = [
     "UNTR.JK", "JSMR.JK", "AKRA.JK", "MAPI.JK", "CPIN.JK", "BRIS.JK",
     "EXCL.JK", "TINS.JK",
 ]
+
+# Data provider configuration (set via environment variables)
+DATA_PROVIDER = os.getenv("DATA_PROVIDER", "twelvedata").strip().lower()
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
+TWELVEDATA_BASE_URL = os.getenv("TWELVEDATA_BASE_URL", "https://api.twelvedata.com").strip().rstrip("/")
+GOAPI_API_KEY = os.getenv("GOAPI_API_KEY", "").strip()
+GOAPI_BASE_URL = os.getenv("GOAPI_BASE_URL", "https://api.goapi.io").strip().rstrip("/")
+GOAPI_OHLCV_ENDPOINT = os.getenv("GOAPI_OHLCV_ENDPOINT", "").strip()
+GOAPI_QUOTE_ENDPOINT = os.getenv("GOAPI_QUOTE_ENDPOINT", "").strip()
 
 # Signal thresholds
 OVERSOLD_THRESHOLD = 20
@@ -34,7 +44,7 @@ SMI_PERIOD = 14
 
 def get_data_period(interval: str = "1d") -> str:
     """
-    Return a sensible yfinance period for the given interval.
+    Return a sensible default period for the given interval.
     Intraday intervals are limited; daily+ can use longer history.
     """
     intraday = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}

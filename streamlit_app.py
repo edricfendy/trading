@@ -5,7 +5,7 @@ import streamlit as st
 import pandas as pd
 import warnings
 from datetime import datetime
-from yfinance.exceptions import YFRateLimitError
+from data_fetcher import DataProviderError, DataRateLimitError
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -109,9 +109,12 @@ try:
         sell_signals = [s for s in signals if s.action == "SELL"]
         hold_signals = [s for s in signals if s.action == "HOLD"]
         rebounds = run_rebounds(tuple(tickers), min_rebound)
-except YFRateLimitError:
-    st.error("Yahoo Finance rate limit reached. Please wait and try again.")
+except DataRateLimitError:
+    st.error("Data provider rate limit reached. Please wait and try again.")
     st.info("Tips: reduce 'Max stocks to scan', switch to LQ45/core list, or retry in a few minutes.")
+    st.stop()
+except DataProviderError as exc:
+    st.error(f"Data provider error: {exc}")
     st.stop()
 
 
@@ -337,7 +340,7 @@ with st.expander("📖 Indicator & Signal Guide"):
 with st.expander("⚠️ Disclaimer"):
     st.warning(
         "This tool is for **educational and research purposes only**. "
-        "Data sourced from Yahoo Finance (≈15 min delay). "
+        "Data sourced from Twelve Data or GOAPI depending on your configuration. "
         "Past performance does not guarantee future results. "
         "Always do your own research (DYOR) before making any investment decisions. "
         "This is not financial advice."

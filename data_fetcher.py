@@ -2,18 +2,35 @@
 Indonesia Stock Data Fetcher - Real-time and historical OHLCV data
 """
 import time
-from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
-import yfinance as yf
-from yfinance.exceptions import YFRateLimitError
+import requests
 
-from config import IDX_STOCKS, get_data_period
+from config import (
+    DATA_PROVIDER,
+    GOAPI_API_KEY,
+    GOAPI_OHLCV_ENDPOINT,
+    GOAPI_QUOTE_ENDPOINT,
+    TWELVEDATA_API_KEY,
+    TWELVEDATA_BASE_URL,
+    get_data_period,
+)
 from universe import get_universe
 
-DOWNLOAD_BATCH_SIZE = 25
+DOWNLOAD_BATCH_SIZE = 10
 SLEEP_BETWEEN_BATCHES_SEC = 1.0
+
+
+class DataProviderError(RuntimeError):
+    """Base error for data provider failures."""
+
+
+class DataRateLimitError(DataProviderError):
+    """Raised when a provider rate limit is hit."""
+
+
+_INTRADAY_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}
 
 
 def _resolve_period(period: Optional[str], interval: str) -> str:
@@ -42,42 +59,167 @@ def _download_batch(
         return {}
 
     period = _resolve_period(period, interval)
-    data = yf.download(
-        tickers=" ".join(tickers),
-        period=period,
-        interval=interval,
-        group_by="ticker",
-        auto_adjust=False,
-        threads=False,  # reduce parallel requests to avoid rate limits
-        progress=False,
-    )
 
-    if data is None or data.empty:
-        return {}
+    if DATA_PROVIDER == "twelvedata":
+        return _download_twelvedata_batch(tickers, period, interval)
+    if DATA_PROVIDER == "goapi":
+        return _download_goapi_batch(tickers, period, interval)
+
+    raise DataProviderError(f"Unsupported DATA_PROVIDER: {DATA_PROVIDER}")
+
+
+def _td_interval(interval: str) -> str:
+    mapping = {
+        "1m": "1min",
+        "5m": "5min",
+        "15m": "15min",
+        "30m": "30min",
+        "45m": "45min",
+        "60m": "1h",
+        "90m": "1h",
+        "1h": "1h",
+        "1d": "1day",
+        "1wk": "1week",
+        "1mo": "1month",
+    }
+    if interval not in mapping:
+        raise DataProviderError(f"Unsupported interval for Twelve Data: {interval}")
+    return mapping[interval]
+
+
+def _td_symbol(ticker: str) -> str:
+    if ":" in ticker:
+        return ticker
+    if ticker.endswith(".JK"):
+        return f"{ticker[:-3]}:IDX"
+    return ticker
+
+
+def _period_to_trading_days(period: str) -> Optional[int]:
+    if not period:
+        return None
+    p = period.lower()
+    try:
+        if p.endswith("mo"):
+            return int(p[:-2]) * 22
+        if p.endswith("wk"):
+            return int(p[:-2]) * 5
+        if p.endswith("y"):
+            return int(p[:-1]) * 252
+        if p.endswith("d"):
+            return int(p[:-1])
+    except ValueError:
+        return None
+    return None
+
+
+def _resolve_outputsize(period: Optional[str], interval: str) -> int:
+    period = _resolve_period(period, interval)
+    days = _period_to_trading_days(period) or 200
+    size = days
+    if interval in _INTRADAY_INTERVALS:
+        size = max(days * 8, 200)
+    return int(min(max(size, 50), 5000))
+
+
+def _parse_twelvedata_payload(payload: dict) -> pd.DataFrame:
+    values = payload.get("values") or []
+    if not values:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(values)
+    if "datetime" not in df.columns:
+        return pd.DataFrame()
+
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    df = df.dropna(subset=["datetime"])
+    df = df.sort_values("datetime")
+    df = df.rename(columns=str.lower)
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = 0.0
+
+    df = df.set_index("datetime")[["open", "high", "low", "close", "volume"]]
+    return _normalize_ohlcv(df)
+
+
+def _raise_twelvedata_error(resp: requests.Response, payload: dict) -> None:
+    if resp.status_code == 429 or payload.get("code") == 429:
+        raise DataRateLimitError(payload.get("message") or "Twelve Data rate limit reached.")
+    if payload.get("status") == "error":
+        raise DataProviderError(payload.get("message") or "Twelve Data error.")
+    if resp.status_code >= 400:
+        raise DataProviderError(f"Twelve Data HTTP {resp.status_code}.")
+
+
+def _download_twelvedata_batch(
+    tickers: list[str],
+    period: Optional[str],
+    interval: str,
+) -> dict[str, pd.DataFrame]:
+    if not TWELVEDATA_API_KEY:
+        raise DataProviderError("TWELVEDATA_API_KEY is not set.")
+
+    td_interval = _td_interval(interval)
+    outputsize = _resolve_outputsize(period, interval)
+    symbol_map = {t: _td_symbol(t) for t in tickers}
+    symbols = ",".join(symbol_map.values())
+
+    url = f"{TWELVEDATA_BASE_URL}/time_series"
+    params = {
+        "symbol": symbols,
+        "interval": td_interval,
+        "apikey": TWELVEDATA_API_KEY,
+        "outputsize": outputsize,
+        "format": "JSON",
+    }
+    resp = requests.get(url, params=params, timeout=20)
+    try:
+        payload = resp.json()
+    except ValueError:
+        raise DataProviderError("Twelve Data returned non-JSON response.")
+
+    _raise_twelvedata_error(resp, payload if isinstance(payload, dict) else {})
 
     results: dict[str, pd.DataFrame] = {}
-    if isinstance(data.columns, pd.MultiIndex):
-        level0 = data.columns.get_level_values(0)
-        if tickers[0] in set(level0):
-            # group_by="ticker": columns are (TICKER, field)
-            for t in tickers:
-                if t in level0:
-                    sub = data[t].dropna(how="all")
-                    if not sub.empty:
-                        results[t] = _normalize_ohlcv(sub)
-        else:
-            # fallback: try (field, TICKER)
-            level1 = data.columns.get_level_values(1)
-            for t in tickers:
-                if t in level1:
-                    sub = data.xs(t, axis=1, level=1, drop_level=True).dropna(how="all")
-                    if not sub.empty:
-                        results[t] = _normalize_ohlcv(sub)
-    else:
-        # single ticker
-        results[tickers[0]] = _normalize_ohlcv(data)
+    if isinstance(payload, dict) and "values" in payload:
+        ticker = tickers[0]
+        results[ticker] = _parse_twelvedata_payload(payload)
+        return {k: v for k, v in results.items() if not v.empty}
+
+    if isinstance(payload, dict):
+        reverse_map = {v: k for k, v in symbol_map.items()}
+        for sym, data in payload.items():
+            if not isinstance(data, dict):
+                continue
+            if data.get("status") == "error":
+                continue
+            ticker = reverse_map.get(sym, sym)
+            df = _parse_twelvedata_payload(data)
+            if not df.empty:
+                results[ticker] = df
 
     return results
+
+
+def _download_goapi_batch(
+    tickers: list[str],
+    period: Optional[str],
+    interval: str,
+) -> dict[str, pd.DataFrame]:
+    if not GOAPI_API_KEY:
+        raise DataProviderError("GOAPI_API_KEY is not set.")
+    if not GOAPI_OHLCV_ENDPOINT:
+        raise DataProviderError("GOAPI_OHLCV_ENDPOINT is not set.")
+    if not GOAPI_QUOTE_ENDPOINT:
+        raise DataProviderError("GOAPI_QUOTE_ENDPOINT is not set.")
+
+    raise DataProviderError(
+        "GOAPI integration requires endpoint details. "
+        "Provide GOAPI_OHLCV_ENDPOINT/GOAPI_QUOTE_ENDPOINT with the expected params."
+    )
 
 
 def fetch_stock_data(
@@ -91,7 +233,7 @@ def fetch_stock_data(
     """
     try:
         batch = _download_batch([ticker], period=period, interval=interval)
-    except YFRateLimitError:
+    except DataRateLimitError:
         raise
 
     df = batch.get(ticker, pd.DataFrame())
@@ -125,7 +267,7 @@ def fetch_multiple_stocks(
     for i, batch in enumerate(batches):
         try:
             batch_data = _download_batch(batch, period=period, interval=interval)
-        except YFRateLimitError:
+        except DataRateLimitError:
             # bubble up to UI for a friendly message
             raise
         results.update(batch_data)
@@ -138,11 +280,11 @@ def fetch_multiple_stocks(
 def fetch_intraday(ticker: str, interval: str = "1h") -> pd.DataFrame:
     """
     Fetch intraday data for shorter-term analysis.
-    Note: yfinance intraday has limitations; 1h is typically available.
+    Note: intraday availability depends on the data provider and plan.
     """
     try:
         batch = _download_batch([ticker], period="5d", interval=interval)
-    except YFRateLimitError:
+    except DataRateLimitError:
         raise
     df = batch.get(ticker, pd.DataFrame())
     if df.empty:

@@ -45,6 +45,18 @@ Edit `config.py` to:
 - Change thresholds: `OVERSOLD_THRESHOLD`, `OVERBOUGHT_THRESHOLD`, `SMI_BULLISH_THRESHOLD`
 - Adjust indicator periods: `STOCH_RSI_PERIOD`, `SMI_PERIOD`
 
+## Data Provider
+
+This app now reads market data from **Twelve Data** (default) or **GOAPI**.
+
+Set environment variables before running:
+
+- `DATA_PROVIDER` = `twelvedata` or `goapi`
+- `TWELVEDATA_API_KEY` (required for Twelve Data)
+- `GOAPI_API_KEY` (required for GOAPI)
+- `GOAPI_OHLCV_ENDPOINT` and `GOAPI_QUOTE_ENDPOINT` (required for GOAPI integration)
+- `.JK` tickers are automatically converted to `:IDX` for Twelve Data
+
 ## Deploy on Render (Streamlit)
 
 1. Create a Web Service and connect your repo
@@ -53,7 +65,7 @@ Edit `config.py` to:
 
 ## Data Source
 
-Uses **yfinance** (Yahoo Finance) with `.JK` suffix for Indonesia stocks. Data is delayed (≈15 min). For real-time trading, consider a paid IDX API (e.g. RapidAPI Indonesia Stock Exchange).
+Uses **Twelve Data** by default. Note: Twelve Data lists IDX coverage as end-of-day, not real-time. For real-time IDX data, use a provider like GOAPI and set `DATA_PROVIDER=goapi`.
 
 ## Disclaimer
 

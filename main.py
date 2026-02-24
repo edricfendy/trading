@@ -18,7 +18,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
 from tabulate import tabulate
 from datetime import datetime
 from analyzer import get_all_signals, screen_rebound_candidates, TimingSignal, ReboundCandidate
-from yfinance.exceptions import YFRateLimitError
+from data_fetcher import DataProviderError, DataRateLimitError
 
 
 def format_signals(signals: list[TimingSignal]) -> str:
@@ -103,12 +103,14 @@ def run_analysis():
     print("   - Stoch RSI < 20 = oversold (potential buy)")
     print("   - Stoch RSI > 80 = overbought (potential sell)")
     print("   - SMI > 0 = smart money accumulating")
-    print("   - Run regularly for real-time updates")
+    print("   - Run regularly for fresh updates")
     print("=" * 70)
 
 
 if __name__ == "__main__":
     try:
         run_analysis()
-    except YFRateLimitError:
-        print("Yahoo Finance rate limit reached. Reduce tickers or retry in a few minutes.")
+    except DataRateLimitError:
+        print("Data provider rate limit reached. Reduce tickers or retry in a few minutes.")
+    except DataProviderError as exc:
+        print(f"Data provider error: {exc}")
