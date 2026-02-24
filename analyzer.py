@@ -6,7 +6,7 @@ import numpy as np
 from typing import Optional
 from dataclasses import dataclass, field
 from config import OVERSOLD_THRESHOLD, OVERBOUGHT_THRESHOLD, SMI_BULLISH_THRESHOLD
-from data_fetcher import fetch_multiple_stocks, fetch_stock_data
+from data_fetcher import fetch_multiple_stocks, fetch_stock_data, fetch_realtime_prices, update_last_candle_with_realtime
 from indicators import add_indicators
 from fundamentals import FundamentalSnapshot, fetch_fundamentals
 
@@ -431,13 +431,26 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
 def screen_rebound_candidates(
     tickers: Optional[list] = None,
     min_score: float = 50,
+    rt_prices: Optional[dict] = None,
 ) -> list:
     data = fetch_multiple_stocks(tickers=tickers, period="3mo")
+
+    # Fetch real-time prices if not supplied
+    if rt_prices is None:
+        try:
+            rt_prices, _ = fetch_realtime_prices(list(data.keys()))
+        except Exception:
+            rt_prices = {}
+
     candidates = []
 
     for ticker, df in data.items():
         if df.empty or len(df) < 30:
             continue
+
+        # Inject real-time price into the last candle BEFORE computing indicators
+        if ticker in rt_prices:
+            df = update_last_candle_with_realtime(df, rt_prices[ticker])
 
         df = add_indicators(df)
         latest = df.iloc[-1]
@@ -504,10 +517,33 @@ def screen_rebound_candidates(
     return sorted(candidates, key=lambda x: x.rebound_score, reverse=True)
 
 
-def get_all_signals(tickers: Optional[list] = None) -> list:
+def get_all_signals(
+    tickers: Optional[list] = None,
+) -> tuple[list, dict, str]:
+    """
+    Fetch data, inject real-time prices into OHLCV, then compute indicators.
+
+    Returns:
+        (signals_list, rt_prices_dict, rt_source_label)
+    """
     data = fetch_multiple_stocks(tickers=tickers, period="3mo")
+
+    # Fetch real-time prices for all tickers in one batch
+    rt_prices: dict[str, float] = {}
+    rt_source_label = ""
+    try:
+        rt_prices, rt_source_label = fetch_realtime_prices(list(data.keys()))
+    except Exception:
+        rt_prices = {}
+        rt_source_label = ""
+
     signals = []
     for ticker, df in data.items():
+        # Inject real-time price into the last candle BEFORE computing indicators
+        if ticker in rt_prices:
+            df = update_last_candle_with_realtime(df, rt_prices[ticker])
         sig = analyze_buy_sell_timing(df, ticker)
         signals.append(sig)
-    return sorted(signals, key=lambda x: (x.action != "HOLD", -x.confidence))
+
+    sorted_signals = sorted(signals, key=lambda x: (x.action != "HOLD", -x.confidence))
+    return sorted_signals, rt_prices, rt_source_label

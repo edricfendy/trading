@@ -5,7 +5,7 @@ import streamlit as st
 import pandas as pd
 import warnings
 from datetime import datetime
-from data_fetcher import DataProviderError, DataRateLimitError, fetch_realtime_prices
+from data_fetcher import DataProviderError, DataRateLimitError
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -98,17 +98,23 @@ def run_signals(ticker_tuple):
     return get_all_signals(tickers=list(ticker_tuple))
 
 @st.cache_data(ttl=600, show_spinner=False)
-def run_rebounds(ticker_tuple, min_score):
-    return screen_rebound_candidates(tickers=list(ticker_tuple), min_score=min_score)
+def run_rebounds(ticker_tuple, min_score, _rt_prices_tuple):
+    # Convert frozen tuple back to dict for rt_prices
+    rt_prices = dict(_rt_prices_tuple) if _rt_prices_tuple else {}
+    return screen_rebound_candidates(
+        tickers=list(ticker_tuple), min_score=min_score, rt_prices=rt_prices
+    )
 
 
 try:
-    with st.spinner("⏳ Loading stock data and running analysis (this may take a minute)..."):
-        signals = run_signals(tuple(tickers))
+    with st.spinner("⏳ Loading stock data, fetching real-time prices, and running analysis..."):
+        signals, rt_prices, rt_source_label = run_signals(tuple(tickers))
         buy_signals  = [s for s in signals if s.action == "BUY"]
         sell_signals = [s for s in signals if s.action == "SELL"]
         hold_signals = [s for s in signals if s.action == "HOLD"]
-        rebounds = run_rebounds(tuple(tickers), min_rebound)
+        # Pass real-time prices to rebounds so they don't re-fetch
+        rt_prices_tuple = tuple(sorted(rt_prices.items())) if rt_prices else ()
+        rebounds = run_rebounds(tuple(tickers), min_rebound, rt_prices_tuple)
 except DataRateLimitError:
     st.error("Data provider rate limit reached. Please wait and try again.")
     st.info("Tips: reduce 'Max stocks to scan', switch to LQ45/core list, or retry in a few minutes.")
@@ -117,30 +123,6 @@ except DataProviderError as exc:
     st.error(f"Data provider error: {exc}")
     st.stop()
 
-# ─── Real-time price overlay ──────────────────────────────────────────────────
-rt_source_label = ""
-try:
-    with st.spinner("📡 Fetching real-time prices..."):
-        rt_prices, rt_source_label = fetch_realtime_prices(tickers)
-        for sig in signals:
-            if sig.ticker in rt_prices:
-                rt_price = rt_prices[sig.ticker]
-                # Recalculate TP/SL with real-time price
-                if sig.action == "BUY" and sig.atr:
-                    if sig.resistance_20:
-                        sig.take_profit = float(min(sig.resistance_20 * 0.98, rt_price + 2.5 * sig.atr))
-                    else:
-                        sig.take_profit = rt_price + 2.5 * sig.atr
-                    if sig.support_20:
-                        sig.stop_loss = float(max(sig.support_20 * 0.97, rt_price - 1.5 * sig.atr))
-                    else:
-                        sig.stop_loss = rt_price - 1.5 * sig.atr
-                sig.price = rt_price
-        for reb in rebounds:
-            if reb.ticker in rt_prices:
-                reb.price = rt_prices[reb.ticker]
-except Exception:
-    rt_source_label = ""
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -280,7 +262,7 @@ def rebounds_to_df(candidates: list[ReboundCandidate]) -> pd.DataFrame:
 # ─── Summary metrics ──────────────────────────────────────────────────────────
 st.header("📊 Signal Summary")
 if rt_source_label:
-    st.caption(f"📡 **Live prices**: {rt_source_label} | 📊 **Indicators**: Daily historical (yfinance)")
+    st.caption(f"📡 **Live prices + indicators**: {rt_source_label} | Real-time prices injected into OHLCV before indicator calculation")
 else:
     st.caption("📊 Prices & Indicators: yfinance (may be ~15-min delayed)")
 c1, c2, c3, c4 = st.columns(4)

@@ -73,10 +73,13 @@ def run_analysis():
 
     print("\n>> BUY/SELL TIMING SIGNALS (Stochastic RSI + Smart Money)")
     print("-" * 70)
-    signals = get_all_signals()
+    signals, rt_prices, rt_source_label = get_all_signals()
     buy_signals = [s for s in signals if s.action == "BUY"]
     sell_signals = [s for s in signals if s.action == "SELL"]
     hold_signals = [s for s in signals if s.action == "HOLD"]
+
+    if rt_source_label:
+        print(f"\n   📡 Live prices: {rt_source_label}")
 
     if buy_signals:
         print("\n[BUY] OPPORTUNITIES:")
@@ -92,7 +95,7 @@ def run_analysis():
     print(">> POTENTIAL REBOUND CANDIDATES")
     print("   (Oversold Stoch RSI + Smart Money accumulation)")
     print("-" * 70)
-    rebounds = screen_rebound_candidates(min_score=40)
+    rebounds = screen_rebound_candidates(min_score=40, rt_prices=rt_prices)
     if rebounds:
         print(format_rebounds(rebounds))
     else:

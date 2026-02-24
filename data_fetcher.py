@@ -694,3 +694,27 @@ def fetch_realtime_prices(tickers: list[str]) -> tuple[dict[str, float], str]:
     source_label = " | ".join(parts) if parts else "No real-time source"
 
     return prices, source_label
+
+
+def update_last_candle_with_realtime(
+    df: pd.DataFrame, rt_price: float
+) -> pd.DataFrame:
+    """
+    Patch the last candle of an OHLCV DataFrame with a real-time price.
+
+    Updates close to the live price and adjusts high/low if the live price
+    exceeds the historical range. This ensures that all indicators computed
+    on this DataFrame reflect the most recent market price.
+    """
+    if df is None or df.empty or rt_price is None or rt_price <= 0:
+        return df
+
+    df = df.copy()
+    idx = df.index[-1]
+    df.loc[idx, "close"] = rt_price
+    # Extend high/low if the real-time price broke intraday range
+    if rt_price > df.loc[idx, "high"]:
+        df.loc[idx, "high"] = rt_price
+    if rt_price < df.loc[idx, "low"]:
+        df.loc[idx, "low"] = rt_price
+    return df
