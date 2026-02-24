@@ -57,6 +57,12 @@ Set environment variables before running:
 - `GOAPI_OHLCV_ENDPOINT` and `GOAPI_QUOTE_ENDPOINT` (required for GOAPI integration)
 - `.JK` tickers are automatically converted to `:IDX` for Twelve Data
 
+You can also use a local `.env` file (ignored by git). Example:
+```bash
+DATA_PROVIDER=twelvedata
+TWELVEDATA_API_KEY=YOUR_KEY
+```
+
 ## Deploy on Render (Streamlit)
 
 1. Create a Web Service and connect your repo

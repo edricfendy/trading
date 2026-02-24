@@ -12,6 +12,14 @@ from typing import List, Optional, Set
 
 import requests
 
+# Load environment variables from .env if available.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 # Core LQ45 / large-cap Indonesia stocks (used when all_idx=False)
 IDX_STOCKS = [
     "BBCA.JK", "BBRI.JK", "BMRI.JK", "BBNI.JK", "BBTN.JK", "TLKM.JK",
