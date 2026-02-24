@@ -5,7 +5,7 @@ import streamlit as st
 import pandas as pd
 import warnings
 from datetime import datetime
-from data_fetcher import DataProviderError, DataRateLimitError
+from data_fetcher import DataProviderError, DataRateLimitError, fetch_realtime_prices
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -116,6 +116,31 @@ except DataRateLimitError:
 except DataProviderError as exc:
     st.error(f"Data provider error: {exc}")
     st.stop()
+
+# ─── Real-time price overlay ──────────────────────────────────────────────────
+rt_source_label = ""
+try:
+    with st.spinner("📡 Fetching real-time prices..."):
+        rt_prices, rt_source_label = fetch_realtime_prices(tickers)
+        for sig in signals:
+            if sig.ticker in rt_prices:
+                rt_price = rt_prices[sig.ticker]
+                # Recalculate TP/SL with real-time price
+                if sig.action == "BUY" and sig.atr:
+                    if sig.resistance_20:
+                        sig.take_profit = float(min(sig.resistance_20 * 0.98, rt_price + 2.5 * sig.atr))
+                    else:
+                        sig.take_profit = rt_price + 2.5 * sig.atr
+                    if sig.support_20:
+                        sig.stop_loss = float(max(sig.support_20 * 0.97, rt_price - 1.5 * sig.atr))
+                    else:
+                        sig.stop_loss = rt_price - 1.5 * sig.atr
+                sig.price = rt_price
+        for reb in rebounds:
+            if reb.ticker in rt_prices:
+                reb.price = rt_prices[reb.ticker]
+except Exception:
+    rt_source_label = ""
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -254,6 +279,10 @@ def rebounds_to_df(candidates: list[ReboundCandidate]) -> pd.DataFrame:
 
 # ─── Summary metrics ──────────────────────────────────────────────────────────
 st.header("📊 Signal Summary")
+if rt_source_label:
+    st.caption(f"📡 **Live prices**: {rt_source_label} | 📊 **Indicators**: Daily historical (yfinance)")
+else:
+    st.caption("📊 Prices & Indicators: yfinance (may be ~15-min delayed)")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("🟢 BUY", len(buy_signals))
 c2.metric("🔴 SELL", len(sell_signals))

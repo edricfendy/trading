@@ -2,12 +2,15 @@
 Indonesia Stock Data Fetcher - Real-time and historical OHLCV data
 """
 import os
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
 import requests
+import yfinance as yf
 
 from config import (
     DATA_PROVIDER,
@@ -86,6 +89,45 @@ def _set_cached(key: tuple, data: dict[str, pd.DataFrame]) -> None:
     _CACHE[key] = (time.time(), _clone_data_map(data))
 
 
+def _download_yfinance_batch(
+    tickers: list[str],
+    period: Optional[str],
+    interval: str,
+) -> dict[str, pd.DataFrame]:
+    """Download OHLCV data using yfinance. Best support for .JK (IDX) tickers."""
+    period = _resolve_period(period, interval)
+    results: dict[str, pd.DataFrame] = {}
+
+    # Map yfinance interval names
+    yf_interval_map = {
+        "1m": "1m", "2m": "2m", "5m": "5m", "15m": "15m",
+        "30m": "30m", "60m": "60m", "90m": "90m", "1h": "1h",
+        "1d": "1d", "1wk": "1wk", "1mo": "1mo",
+    }
+    yf_interval = yf_interval_map.get(interval, "1d")
+
+    for ticker in tickers:
+        try:
+            t = yf.Ticker(ticker)
+            df = t.history(period=period, interval=yf_interval, auto_adjust=True)
+            if df is not None and not df.empty:
+                df = df.rename(columns=str.lower)
+                # Ensure standard column names
+                col_map = {"stock splits": "stock_splits"}
+                df = df.rename(columns=col_map)
+                # Keep only OHLCV columns
+                keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
+                if len(keep) >= 4:  # at least OHLC
+                    df = df[keep]
+                    df = _normalize_ohlcv(df)
+                    if not df.empty:
+                        results[ticker] = df
+        except Exception:
+            continue
+
+    return results
+
+
 def _download_batch(
     tickers: list[str],
     period: Optional[str],
@@ -96,6 +138,8 @@ def _download_batch(
 
     period = _resolve_period(period, interval)
 
+    if DATA_PROVIDER == "yfinance":
+        return _download_yfinance_batch(tickers, period, interval)
     if DATA_PROVIDER == "twelvedata":
         return _download_twelvedata_batch(tickers, period, interval)
     if DATA_PROVIDER == "goapi":
@@ -551,3 +595,102 @@ def get_latest_price(ticker: str) -> Optional[float]:
     if df.empty:
         return None
     return float(df["close"].iloc[-1])
+
+
+# ─── Real-time price fetching ────────────────────────────────────────────────
+
+_RT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+def _fetch_rt_google(ticker: str) -> Optional[float]:
+    """Fetch real-time price from Google Finance for an IDX stock."""
+    code = ticker.replace(".JK", "").upper()
+    url = f"https://www.google.com/finance/quote/{code}:IDX"
+    try:
+        resp = requests.get(url, timeout=10, headers=_RT_HEADERS)
+        if not resp.ok:
+            return None
+        # Google Finance stores the price in a data-last-price attribute
+        match = re.search(r'data-last-price="([\d.]+)"', resp.text)
+        if match:
+            price = float(match.group(1))
+            return price if price > 0 else None
+    except Exception:
+        return None
+    return None
+
+
+def _fetch_rt_yahoo_chart(ticker: str) -> Optional[float]:
+    """Fetch price from Yahoo Finance chart API (may be ~15-min delayed)."""
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        resp = requests.get(url, timeout=10, headers=_RT_HEADERS)
+        if not resp.ok:
+            return None
+        data = resp.json()
+        result = data.get("chart", {}).get("result")
+        if result and len(result) > 0:
+            meta = result[0].get("meta", {})
+            price = meta.get("regularMarketPrice")
+            if price and float(price) > 0:
+                return float(price)
+    except Exception:
+        return None
+    return None
+
+
+def fetch_realtime_prices(tickers: list[str]) -> tuple[dict[str, float], str]:
+    """
+    Fetch real-time prices for IDX stocks using multiple sources.
+    Priority: Google Finance (real-time) → Yahoo chart API (fallback).
+
+    Returns:
+        (prices_dict, source_label)
+        prices_dict: {ticker: price} for tickers with successful fetch
+        source_label: description of which source provided the data
+    """
+    prices: dict[str, float] = {}
+    google_count = 0
+    yahoo_count = 0
+
+    def _fetch_one(ticker: str) -> tuple[str, Optional[float], str]:
+        # Try Google Finance first (true real-time during market hours)
+        price = _fetch_rt_google(ticker)
+        if price is not None:
+            return ticker, price, "google"
+        # Fallback to Yahoo chart API
+        price = _fetch_rt_yahoo_chart(ticker)
+        if price is not None:
+            return ticker, price, "yahoo"
+        return ticker, None, "none"
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, t): t for t in tickers}
+        for future in as_completed(futures):
+            try:
+                ticker, price, source = future.result()
+                if price is not None:
+                    prices[ticker] = price
+                    if source == "google":
+                        google_count += 1
+                    elif source == "yahoo":
+                        yahoo_count += 1
+            except Exception:
+                continue
+
+    # Build source label
+    parts = []
+    if google_count > 0:
+        parts.append(f"Google Finance: {google_count}")
+    if yahoo_count > 0:
+        parts.append(f"Yahoo Finance: {yahoo_count}")
+    source_label = " | ".join(parts) if parts else "No real-time source"
+
+    return prices, source_label

@@ -30,7 +30,7 @@ IDX_STOCKS = [
 ]
 
 # Data provider configuration (set via environment variables)
-DATA_PROVIDER = os.getenv("DATA_PROVIDER", "twelvedata").strip().lower()
+DATA_PROVIDER = os.getenv("DATA_PROVIDER", "yfinance").strip().lower()
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
 TWELVEDATA_BASE_URL = os.getenv("TWELVEDATA_BASE_URL", "https://api.twelvedata.com").strip().rstrip("/")
 GOAPI_API_KEY = os.getenv("GOAPI_API_KEY", "").strip()
