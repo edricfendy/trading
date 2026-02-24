@@ -63,6 +63,11 @@ DATA_PROVIDER=twelvedata
 TWELVEDATA_API_KEY=YOUR_KEY
 ```
 
+Optional tuning to reduce rate-limit errors:
+- `DATA_CACHE_TTL_SEC` (default `60`) – reuse cached OHLCV for a short time
+- `TWELVEDATA_MAX_RETRIES` (default `2`) – retry on 429
+- `TWELVEDATA_RETRY_BACKOFF_SEC` (default `2.0`) – backoff between retries
+
 ## Deploy on Render (Streamlit)
 
 1. Create a Web Service and connect your repo

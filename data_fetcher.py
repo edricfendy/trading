@@ -1,6 +1,7 @@
 """
 Indonesia Stock Data Fetcher - Real-time and historical OHLCV data
 """
+import os
 import time
 from typing import Optional
 
@@ -20,6 +21,11 @@ from universe import get_universe
 
 DOWNLOAD_BATCH_SIZE = 10
 SLEEP_BETWEEN_BATCHES_SEC = 1.0
+DATA_CACHE_TTL_SEC = int(os.getenv("DATA_CACHE_TTL_SEC", "60"))
+TWELVEDATA_MAX_RETRIES = int(os.getenv("TWELVEDATA_MAX_RETRIES", "2"))
+TWELVEDATA_RETRY_BACKOFF_SEC = float(os.getenv("TWELVEDATA_RETRY_BACKOFF_SEC", "2.0"))
+
+_CACHE: dict[tuple, tuple[float, dict[str, pd.DataFrame]]] = {}
 
 
 class DataProviderError(RuntimeError):
@@ -48,6 +54,33 @@ def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 def _chunked(items: list[str], size: int):
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+def _cache_key(tickers: list[str], period: Optional[str], interval: str, all_idx: bool) -> tuple:
+    return (tuple(tickers), period or "", interval, bool(all_idx))
+
+
+def _clone_data_map(data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    return {k: v.copy() for k, v in data.items()}
+
+
+def _get_cached(key: tuple) -> Optional[dict[str, pd.DataFrame]]:
+    if DATA_CACHE_TTL_SEC <= 0:
+        return None
+    entry = _CACHE.get(key)
+    if not entry:
+        return None
+    ts, data = entry
+    if time.time() - ts > DATA_CACHE_TTL_SEC:
+        _CACHE.pop(key, None)
+        return None
+    return _clone_data_map(data)
+
+
+def _set_cached(key: tuple, data: dict[str, pd.DataFrame]) -> None:
+    if DATA_CACHE_TTL_SEC <= 0:
+        return
+    _CACHE[key] = (time.time(), _clone_data_map(data))
 
 
 def _download_batch(
@@ -175,13 +208,35 @@ def _download_twelvedata_batch(
         "outputsize": outputsize,
         "format": "JSON",
     }
-    resp = requests.get(url, params=params, timeout=20)
-    try:
-        payload = resp.json()
-    except ValueError:
-        raise DataProviderError("Twelve Data returned non-JSON response.")
+    payload: dict | list | None = None
+    for attempt in range(TWELVEDATA_MAX_RETRIES + 1):
+        resp = requests.get(url, params=params, timeout=20)
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = None
 
-    _raise_twelvedata_error(resp, payload if isinstance(payload, dict) else {})
+        if payload is None:
+            if attempt >= TWELVEDATA_MAX_RETRIES:
+                raise DataProviderError("Twelve Data returned non-JSON response.")
+            time.sleep(TWELVEDATA_RETRY_BACKOFF_SEC * (2**attempt))
+            continue
+
+        try:
+            _raise_twelvedata_error(resp, payload if isinstance(payload, dict) else {})
+            break
+        except DataRateLimitError:
+            if attempt >= TWELVEDATA_MAX_RETRIES:
+                raise
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                wait_sec = float(retry_after) if retry_after else None
+            except ValueError:
+                wait_sec = None
+            time.sleep(wait_sec or (TWELVEDATA_RETRY_BACKOFF_SEC * (2**attempt)))
+
+    if payload is None:
+        return {}
 
     results: dict[str, pd.DataFrame] = {}
     if isinstance(payload, dict) and "values" in payload:
@@ -262,6 +317,11 @@ def fetch_multiple_stocks(
     if not tickers:
         return {}
 
+    cache_key = _cache_key(tickers, period, interval, all_idx)
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     results: dict[str, pd.DataFrame] = {}
     batches = list(_chunked(tickers, DOWNLOAD_BATCH_SIZE))
     for i, batch in enumerate(batches):
@@ -274,6 +334,7 @@ def fetch_multiple_stocks(
         if i < len(batches) - 1:
             time.sleep(SLEEP_BETWEEN_BATCHES_SEC)
 
+    _set_cached(cache_key, results)
     return results
 
 
