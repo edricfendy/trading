@@ -3,6 +3,7 @@ Indonesia Stock Data Fetcher - Real-time and historical OHLCV data
 """
 import os
 import time
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -11,6 +12,7 @@ import requests
 from config import (
     DATA_PROVIDER,
     GOAPI_API_KEY,
+    GOAPI_BASE_URL,
     GOAPI_OHLCV_ENDPOINT,
     GOAPI_QUOTE_ENDPOINT,
     TWELVEDATA_API_KEY,
@@ -24,6 +26,7 @@ SLEEP_BETWEEN_BATCHES_SEC = 1.0
 DATA_CACHE_TTL_SEC = int(os.getenv("DATA_CACHE_TTL_SEC", "60"))
 TWELVEDATA_MAX_RETRIES = int(os.getenv("TWELVEDATA_MAX_RETRIES", "2"))
 TWELVEDATA_RETRY_BACKOFF_SEC = float(os.getenv("TWELVEDATA_RETRY_BACKOFF_SEC", "2.0"))
+GOAPI_SLEEP_BETWEEN_CALLS_SEC = float(os.getenv("GOAPI_SLEEP_BETWEEN_CALLS_SEC", "0.2"))
 
 _CACHE: dict[tuple, tuple[float, dict[str, pd.DataFrame]]] = {}
 
@@ -208,7 +211,7 @@ def _download_twelvedata_batch(
         "outputsize": outputsize,
         "format": "JSON",
     }
-    payload: dict | list | None = None
+    payload = None
     for attempt in range(TWELVEDATA_MAX_RETRIES + 1):
         resp = requests.get(url, params=params, timeout=20)
         try:
@@ -259,6 +262,170 @@ def _download_twelvedata_batch(
     return results
 
 
+def _goapi_symbol(ticker: str) -> str:
+    t = ticker.strip().upper()
+    if t.endswith(".JK"):
+        return t[:-3]
+    return t
+
+
+def _build_goapi_url(endpoint: str, symbol: Optional[str] = None) -> str:
+    ep = endpoint.strip()
+    if symbol:
+        ep = ep.replace("{symbol}", symbol).replace(":symbol", symbol)
+    if ep.startswith("http://") or ep.startswith("https://"):
+        return ep
+    if not ep.startswith("/"):
+        ep = "/" + ep
+    return f"{GOAPI_BASE_URL}{ep}"
+
+
+def _period_to_calendar_days(period: str) -> int:
+    if not period:
+        return 30
+    p = period.lower()
+    try:
+        if p.endswith("mo"):
+            return int(p[:-2]) * 30
+        if p.endswith("wk"):
+            return int(p[:-2]) * 7
+        if p.endswith("y"):
+            return int(p[:-1]) * 365
+        if p.endswith("d"):
+            return int(p[:-1])
+    except ValueError:
+        return 30
+    return 30
+
+
+def _goapi_date_range(period: Optional[str], interval: str) -> tuple[str, str]:
+    period = _resolve_period(period, interval)
+    days = _period_to_calendar_days(period)
+    if interval in _INTRADAY_INTERVALS:
+        days = min(days, 7)
+    end = datetime.utcnow().date()
+    start = end - timedelta(days=days)
+    return start.isoformat(), end.isoformat()
+
+
+def _extract_goapi_items(payload: object) -> list[dict]:
+    if isinstance(payload, dict):
+        for key in ("data", "result", "results", "values"):
+            val = payload.get(key)
+            if isinstance(val, list):
+                return val
+            if isinstance(val, dict):
+                for k2 in ("items", "results", "values", "data"):
+                    v2 = val.get(k2)
+                    if isinstance(v2, list):
+                        return v2
+        # Some responses may use "results" directly inside "data" as dict of lists
+        if "data" in payload and isinstance(payload["data"], dict):
+            for v in payload["data"].values():
+                if isinstance(v, list):
+                    return v
+    return []
+
+
+def _parse_goapi_ohlcv(items: list[dict]) -> pd.DataFrame:
+    if not items:
+        return pd.DataFrame()
+
+    def _get(item: dict, keys: list[str]):
+        for k in keys:
+            if k in item:
+                return item[k]
+        return None
+
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        lower = {str(k).lower(): v for k, v in item.items()}
+        dt_val = _get(lower, ["datetime", "date", "time", "timestamp", "t"])
+        if dt_val is None:
+            continue
+
+        dt = pd.to_datetime(dt_val, errors="coerce", utc=True)
+        if pd.isna(dt):
+            try:
+                ts = float(dt_val)
+                if ts > 1e12:
+                    dt = pd.to_datetime(int(ts), unit="ms", utc=True)
+                elif ts > 1e10:
+                    dt = pd.to_datetime(int(ts), unit="s", utc=True)
+            except Exception:
+                dt = pd.NaT
+        if pd.isna(dt):
+            continue
+
+        row = {
+            "datetime": dt,
+            "open": _get(lower, ["open", "o"]),
+            "high": _get(lower, ["high", "h"]),
+            "low": _get(lower, ["low", "l"]),
+            "close": _get(lower, ["close", "c", "last", "price"]),
+            "volume": _get(lower, ["volume", "v"]),
+        }
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["datetime"])
+    df = df.sort_values("datetime")
+    df = df.set_index("datetime")[["open", "high", "low", "close", "volume"]]
+    return _normalize_ohlcv(df)
+
+
+def _raise_goapi_error(resp: requests.Response, payload: object) -> None:
+    if resp.status_code == 429:
+        raise DataRateLimitError("GOAPI rate limit reached.")
+    if resp.status_code >= 400:
+        raise DataProviderError(f"GOAPI HTTP {resp.status_code}.")
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        status = str(payload.get("status", "")).lower()
+        msg = payload.get("message") or payload.get("error")
+        if str(code) == "429":
+            raise DataRateLimitError(str(msg) or "GOAPI rate limit reached.")
+        if status in ("error", "failed"):
+            raise DataProviderError(str(msg) or "GOAPI error.")
+
+
+def _goapi_latest_price(ticker: str) -> Optional[float]:
+    if not GOAPI_QUOTE_ENDPOINT:
+        return None
+    url = _build_goapi_url(GOAPI_QUOTE_ENDPOINT)
+    symbol = _goapi_symbol(ticker)
+    headers = {"X-API-KEY": GOAPI_API_KEY}
+    resp = requests.get(url, headers=headers, params={"symbols": symbol}, timeout=20)
+    try:
+        payload = resp.json()
+    except ValueError:
+        raise DataProviderError("GOAPI returned non-JSON response.")
+
+    _raise_goapi_error(resp, payload)
+
+    items = _extract_goapi_items(payload)
+    if not items:
+        return None
+    first = items[0] if isinstance(items, list) else None
+    if not isinstance(first, dict):
+        return None
+    lower = {str(k).lower(): v for k, v in first.items()}
+    for key in ("price", "last", "close", "c"):
+        if key in lower:
+            try:
+                return float(lower[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _download_goapi_batch(
     tickers: list[str],
     period: Optional[str],
@@ -268,13 +435,31 @@ def _download_goapi_batch(
         raise DataProviderError("GOAPI_API_KEY is not set.")
     if not GOAPI_OHLCV_ENDPOINT:
         raise DataProviderError("GOAPI_OHLCV_ENDPOINT is not set.")
-    if not GOAPI_QUOTE_ENDPOINT:
-        raise DataProviderError("GOAPI_QUOTE_ENDPOINT is not set.")
 
-    raise DataProviderError(
-        "GOAPI integration requires endpoint details. "
-        "Provide GOAPI_OHLCV_ENDPOINT/GOAPI_QUOTE_ENDPOINT with the expected params."
-    )
+    start_date, end_date = _goapi_date_range(period, interval)
+    headers = {"X-API-KEY": GOAPI_API_KEY}
+    results: dict[str, pd.DataFrame] = {}
+
+    for i, ticker in enumerate(tickers):
+        symbol = _goapi_symbol(ticker)
+        url = _build_goapi_url(GOAPI_OHLCV_ENDPOINT, symbol)
+        params = {"from": start_date, "to": end_date}
+        resp = requests.get(url, headers=headers, params=params, timeout=20)
+        try:
+            payload = resp.json()
+        except ValueError:
+            raise DataProviderError("GOAPI returned non-JSON response.")
+
+        _raise_goapi_error(resp, payload)
+        items = _extract_goapi_items(payload)
+        df = _parse_goapi_ohlcv(items)
+        if not df.empty:
+            results[ticker] = df
+
+        if i < len(tickers) - 1 and GOAPI_SLEEP_BETWEEN_CALLS_SEC > 0:
+            time.sleep(GOAPI_SLEEP_BETWEEN_CALLS_SEC)
+
+    return results
 
 
 def fetch_stock_data(
@@ -355,6 +540,13 @@ def fetch_intraday(ticker: str, interval: str = "1h") -> pd.DataFrame:
 
 def get_latest_price(ticker: str) -> Optional[float]:
     """Get latest close price for a ticker"""
+    if DATA_PROVIDER == "goapi":
+        try:
+            price = _goapi_latest_price(ticker)
+            if price is not None:
+                return price
+        except DataProviderError:
+            pass
     df = fetch_stock_data(ticker, period="5d")
     if df.empty:
         return None

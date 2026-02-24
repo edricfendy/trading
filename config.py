@@ -34,9 +34,9 @@ DATA_PROVIDER = os.getenv("DATA_PROVIDER", "twelvedata").strip().lower()
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
 TWELVEDATA_BASE_URL = os.getenv("TWELVEDATA_BASE_URL", "https://api.twelvedata.com").strip().rstrip("/")
 GOAPI_API_KEY = os.getenv("GOAPI_API_KEY", "").strip()
-GOAPI_BASE_URL = os.getenv("GOAPI_BASE_URL", "https://api.goapi.io").strip().rstrip("/")
-GOAPI_OHLCV_ENDPOINT = os.getenv("GOAPI_OHLCV_ENDPOINT", "").strip()
-GOAPI_QUOTE_ENDPOINT = os.getenv("GOAPI_QUOTE_ENDPOINT", "").strip()
+GOAPI_BASE_URL = os.getenv("GOAPI_BASE_URL", "https://api.goapi.id/v1").strip().rstrip("/")
+GOAPI_OHLCV_ENDPOINT = os.getenv("GOAPI_OHLCV_ENDPOINT", "/stock/idx/{symbol}/historical").strip()
+GOAPI_QUOTE_ENDPOINT = os.getenv("GOAPI_QUOTE_ENDPOINT", "/stock/idx/prices").strip()
 
 # Signal thresholds
 OVERSOLD_THRESHOLD = 20

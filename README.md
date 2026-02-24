@@ -54,7 +54,9 @@ Set environment variables before running:
 - `DATA_PROVIDER` = `twelvedata` or `goapi`
 - `TWELVEDATA_API_KEY` (required for Twelve Data)
 - `GOAPI_API_KEY` (required for GOAPI)
-- `GOAPI_OHLCV_ENDPOINT` and `GOAPI_QUOTE_ENDPOINT` (required for GOAPI integration)
+- `GOAPI_BASE_URL` (default `https://api.goapi.id/v1`)
+- `GOAPI_OHLCV_ENDPOINT` (default `/stock/idx/{symbol}/historical`)
+- `GOAPI_QUOTE_ENDPOINT` (default `/stock/idx/prices`)
 - `.JK` tickers are automatically converted to `:IDX` for Twelve Data
 
 You can also use a local `.env` file (ignored by git). Example:
@@ -63,10 +65,17 @@ DATA_PROVIDER=twelvedata
 TWELVEDATA_API_KEY=YOUR_KEY
 ```
 
+GOAPI example:
+```bash
+DATA_PROVIDER=goapi
+GOAPI_API_KEY=YOUR_KEY
+```
+
 Optional tuning to reduce rate-limit errors:
 - `DATA_CACHE_TTL_SEC` (default `60`) – reuse cached OHLCV for a short time
 - `TWELVEDATA_MAX_RETRIES` (default `2`) – retry on 429
 - `TWELVEDATA_RETRY_BACKOFF_SEC` (default `2.0`) – backoff between retries
+- `GOAPI_SLEEP_BETWEEN_CALLS_SEC` (default `0.2`) – pause between GOAPI calls
 
 ## Deploy on Render (Streamlit)
 
