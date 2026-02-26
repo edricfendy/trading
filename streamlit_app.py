@@ -396,14 +396,14 @@ with tab1:
         elif selected_ticker:
             st.warning(f"No data available for {selected_ticker}. Check if the ticker is valid.")
     else:
-        # Show summary when no ticker selected
-        st.info("👆 Select or type a ticker above to see detailed analysis.")
+        # Show full analysis for ALL stocks when no ticker selected
+        st.info("👆 Select or type a ticker above for deep-dive analysis with sentiment.")
         st.markdown("---")
 
-        # Show quick summary metrics
+        # Show summary metrics
         st.markdown("### 📊 Market Overview")
         if rt_source_label:
-            st.caption(f"📡 **Live prices + indicators**: {rt_source_label}")
+            st.caption(f"📡 **Live prices + indicators**: {rt_source_label} | Real-time prices injected into OHLCV before indicator calculation")
         else:
             st.caption("📊 Prices & Indicators: yfinance (may be ~15-min delayed)")
 
@@ -413,51 +413,141 @@ with tab1:
         c3.metric("⚪ HOLD", len(hold_signals))
         c4.metric("🔁 Rebound Candidates", len(rebounds))
 
-        # Show top buy/sell signals as a quick table
+        # ─── Helper: full signal table with ALL indicators ───────────────
+        def _full_signal_row(s):
+            """Build a complete row dict with all TA + fundamentals."""
+            horizon_emoji = {
+                "long-term": "🏦", "balanced": "⚖️",
+                "short-term": "⚡", "speculative": "🎯",
+                "neutral": "—",
+            }.get(s.horizon, "—")
+
+            macd_lbl = s.macd_trend or "-"
+            if s.macd_divergence:
+                macd_lbl += f" + {s.macd_divergence} div"
+
+            ff_pct = f"{s.free_float_ratio*100:.1f}%" if s.free_float_ratio else "-"
+            ff_flag = "⚠️" if s.free_float_ratio and s.free_float_ratio < 0.15 else (
+                      "✅" if s.free_float_ratio and s.free_float_ratio > 0.40 else "")
+
+            val_label = ""
+            if s.price_vs_valuation:
+                val_label = f"{'🟢' if s.price_vs_valuation == 'CHEAP' else '🔴'} {s.price_vs_valuation}"
+            else:
+                val_label = s.valuation_label or "-"
+
+            return {
+                "Ticker": s.ticker,
+                "Action": s.action,
+                "Conf": f"{s.confidence:.0%}",
+                "Horizon": f"{horizon_emoji} {s.horizon}",
+                "Valuation": val_label,
+                "Sector": s.sector or "-",
+                "Industry": s.industry or "-",
+                # TA
+                "StochRSI": _fmt(s.stoch_rsi_k, ".1f"),
+                "RSI": _fmt(s.rsi, ".1f"),
+                "SMI": _fmt(s.smi, ".2f"),
+                "MACD": macd_lbl,
+                "Bandar": _fmt(s.bandar_score, ".1f"),
+                "OBV Flow": s.obv_momentum or "-",
+                "ROC12%": _fmt(s.roc_12, ".1f", "%"),
+                "BB Pos": s.bb_position or "-",
+                # Levels
+                "Price": _rp(s.price),
+                "Val Price": _rp(s.valuation_price),
+                "VWAP": _rp(s.vwap),
+                "Support": _rp(s.support_20),
+                "Resist": _rp(s.resistance_20),
+                "Pivot": _rp(s.pivot),
+                "S1": _rp(s.pivot_s1),
+                "R1": _rp(s.pivot_r1),
+                "ATR": _rp(s.atr),
+                "Take Profit": _rp(s.take_profit),
+                "Stop Loss": _rp(s.stop_loss),
+                # Fundamentals – Valuation
+                "PBV": _fmt(s.pbv, ".2f", "x"),
+                "PER": _fmt(s.per, ".1f", "x"),
+                "PER Fwd": _fmt(s.per_forward, ".1f", "x"),
+                # Profitability
+                "ROE": _pct(s.roe),
+                "ROA": _pct(s.roa),
+                "ROIC": _pct(s.roic),
+                "EPS": _fmt(s.eps, ",.0f", " Rp") if s.eps else "-",
+                "EPS Growth": _pct(s.eps_growth),
+                "Gross Mgn": _pct(s.gross_margins),
+                "Net Mgn": _pct(s.profit_margins),
+                # Cash Flow
+                "FCF": _billions(s.free_cashflow),
+                "Op CF": _billions(s.operating_cashflow),
+                "Revenue": _billions(s.revenue),
+                # Solvency
+                "D/E": _fmt(s.debt_to_equity, ".1f", "x"),
+                "Curr Ratio": _fmt(s.current_ratio, ".1f", "x"),
+                # Liquidity
+                f"Free Float {ff_flag}": ff_pct,
+                "Mkt Cap": _billions(s.market_cap),
+                "Div Yield": _pct(s.dividend_yield),
+                "Reason": s.reason[:200] + "..." if len(s.reason) > 200 else s.reason,
+            }
+
+        # ─── BUY SIGNALS ─────────────────────────────────────────────────
         if buy_signals:
-            st.markdown("#### 🟢 Top Buy Signals")
-            top_buy_data = []
-            for s in buy_signals[:10]:
-                val_label = ""
-                if s.price_vs_valuation:
-                    val_label = f"{'🟢' if s.price_vs_valuation == 'CHEAP' else '🔴'} {s.price_vs_valuation}"
-                top_buy_data.append({
-                    "Ticker": s.ticker,
-                    "Name": s.company_name or "-",
-                    "Confidence": f"{s.confidence:.0%}",
-                    "Price": _rp(s.price),
-                    "PBV": _fmt(s.pbv, ".2f", "x") if s.pbv else "-",
-                    "Valuation": val_label or s.valuation_label,
-                    "Sector": s.sector or "-",
-                })
-            st.dataframe(pd.DataFrame(top_buy_data), use_container_width=True, hide_index=True)
+            st.header("🟢 Buy Opportunities")
+            with st.expander("🏦 Long-Term (Undervalued — PBV+PER suggest hold)", expanded=True):
+                lt = [s for s in buy_signals if s.horizon == "long-term"]
+                if lt:
+                    st.dataframe(
+                        pd.DataFrame([_full_signal_row(s) for s in lt]),
+                        use_container_width=True, hide_index=True,
+                    )
+                else:
+                    st.info("No long-term undervalued buys at this time.")
+            with st.expander("⚡ Short-Term / Momentum (TA buy but expensive valuation)", expanded=True):
+                st_ = [s for s in buy_signals if s.horizon in ("short-term", "speculative", "balanced", "neutral")]
+                if st_:
+                    st.dataframe(
+                        pd.DataFrame([_full_signal_row(s) for s in st_]),
+                        use_container_width=True, hide_index=True,
+                    )
+                else:
+                    st.info("No short-term momentum buys at this time.")
 
+        # ─── SELL SIGNALS ────────────────────────────────────────────────
         if sell_signals:
-            st.markdown("#### 🔴 Top Sell Signals")
-            top_sell_data = []
-            for s in sell_signals[:10]:
-                top_sell_data.append({
-                    "Ticker": s.ticker,
-                    "Name": s.company_name or "-",
-                    "Confidence": f"{s.confidence:.0%}",
-                    "Price": _rp(s.price),
-                    "Sector": s.sector or "-",
-                })
-            st.dataframe(pd.DataFrame(top_sell_data), use_container_width=True, hide_index=True)
+            st.header("🔴 Sell Signals")
+            st.dataframe(
+                pd.DataFrame([_full_signal_row(s) for s in sell_signals]),
+                use_container_width=True, hide_index=True,
+            )
 
-        # Rebound candidates
+        # ─── HOLD ────────────────────────────────────────────────────────
+        if hold_signals:
+            with st.expander(f"⚪ Hold / No Strong Signal ({len(hold_signals)} stocks)", expanded=False):
+                st.dataframe(
+                    pd.DataFrame([_full_signal_row(s) for s in hold_signals[:20]]),
+                    use_container_width=True, hide_index=True,
+                )
+
+        # ─── REBOUND CANDIDATES ──────────────────────────────────────────
+        st.header("🔁 Potential Rebound Candidates")
+        st.caption("Oversold Stoch RSI + Smart Money + Bandar accumulation")
         if rebounds:
-            st.markdown("#### 🔁 Rebound Candidates")
             rb_data = []
-            for c in rebounds[:10]:
+            for c in rebounds[:20]:
                 rb_data.append({
                     "Ticker": c.ticker,
-                    "Score": f"{c.rebound_score:.1f}",
-                    "StochRSI": f"{c.stoch_rsi_k:.1f}",
+                    "Rebound Score": f"{c.rebound_score:.1f}",
+                    "Stoch RSI": f"{c.stoch_rsi_k:.1f}",
+                    "SMI Trend": c.smi_trend,
+                    "Bandar": c.bandar_trend,
                     "5d Change": f"{c.recent_change_pct:+.1f}%",
-                    "Price": _rp(c.price),
+                    "Price (Rp)": f"{c.price:,.0f}",
+                    "Reasons": " | ".join(c.reasons[:3]),
                 })
             st.dataframe(pd.DataFrame(rb_data), use_container_width=True, hide_index=True)
+        else:
+            st.info("No strong rebound candidates. Try lowering the min score in the sidebar.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
