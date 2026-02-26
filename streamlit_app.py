@@ -57,6 +57,12 @@ with st.sidebar:
         ["All IDX stocks (~800+)", "LQ45 / core list (26)"],
         index=1,
     )
+    ta_interval = st.selectbox(
+        "TA Interval",
+        ["1d", "1h", "30m", "15m"],
+        index=0,
+        help="Intraday intervals use ~5d of data; daily uses ~3mo.",
+    )
     batch_limit = st.slider(
         "Max stocks to scan",
         min_value=10, max_value=1000,
@@ -92,7 +98,13 @@ with st.sidebar:
         "- Free Float Warning\n"
         "- News Sentiment Analysis\n"
     )
-    if st.button("🔄 Refresh Analysis"):
+    if "refresh_token" not in st.session_state:
+        st.session_state["refresh_token"] = 0.0
+    if "force_refresh" not in st.session_state:
+        st.session_state["force_refresh"] = False
+    if st.button("🔄 Refresh Analysis (bypass cache)"):
+        st.session_state["refresh_token"] = time.time()
+        st.session_state["force_refresh"] = True
         st.cache_data.clear()
         st.rerun()
 
@@ -111,14 +123,20 @@ else:
 
 # ─── Run analysis ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=120, show_spinner=False)
-def run_signals(ticker_tuple):
+def run_signals(ticker_tuple, interval, refresh_token, force_refresh):
     """Use bulk download + TA-only for fast scanning of many tickers."""
-    return get_all_signals_bulk(tickers=list(ticker_tuple), return_data=True)
+    return get_all_signals_bulk(
+        tickers=list(ticker_tuple),
+        interval=interval,
+        period=None,
+        bypass_cache=force_refresh,
+        return_data=True,
+    )
 
 @st.cache_data(ttl=300, show_spinner=False)
-def run_single_ticker_analysis(ticker):
+def run_single_ticker_analysis(ticker, interval, refresh_token):
     """Run analysis for a single ticker with real-time price injection."""
-    df = fetch_stock_data(ticker, period="3mo")
+    df = fetch_stock_data(ticker, period=None, interval=interval)
     if df is None or df.empty:
         return None, None, ""
     # Get real-time price
@@ -144,13 +162,19 @@ def run_sentiment_sector(sector):
 
 try:
     with st.spinner(f"⏳ Bulk downloading {len(tickers)} stocks & running TA analysis..."):
-        signals, rt_prices, rt_source_label, bulk_data = run_signals(tuple(tickers))
+        refresh_token = st.session_state.get("refresh_token", 0.0)
+        force_refresh = st.session_state.get("force_refresh", False)
+        signals, rt_prices, rt_source_label, bulk_data = run_signals(
+            tuple(tickers), ta_interval, refresh_token, force_refresh
+        )
         buy_signals  = [s for s in signals if s.action == "BUY"]
         sell_signals = [s for s in signals if s.action == "SELL"]
         hold_signals = [s for s in signals if s.action == "HOLD"]
         rebounds = screen_rebound_candidates(
             min_score=min_rebound, rt_prices=rt_prices, data=bulk_data
         )
+        if force_refresh:
+            st.session_state["force_refresh"] = False
 except DataRateLimitError:
     st.error("Data provider rate limit reached. Please wait and try again.")
     st.info("Tips: reduce 'Max stocks to scan', switch to LQ45/core list, or retry in a few minutes.")
@@ -277,7 +301,11 @@ with tab1:
             # Fetch fresh for this ticker
             with st.spinner(f"⏳ Analyzing {selected_ticker}..."):
                 try:
-                    sig, rt_price, rt_src = run_single_ticker_analysis(selected_ticker)
+                    sig, rt_price, rt_src = run_single_ticker_analysis(
+                        selected_ticker,
+                        ta_interval,
+                        st.session_state.get("refresh_token", 0.0),
+                    )
                 except Exception as e:
                     st.error(f"Error analyzing {selected_ticker}: {e}")
                     sig = None

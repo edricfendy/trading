@@ -532,6 +532,7 @@ def fetch_multiple_stocks(
     period: Optional[str] = "3mo",
     interval: str = "1d",
     all_idx: bool = True,
+    bypass_cache: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """
     Fetch data for multiple Indonesia stocks.
@@ -548,9 +549,10 @@ def fetch_multiple_stocks(
         return {}
 
     cache_key = _cache_key(tickers, period, interval, all_idx)
-    cached = _get_cached(cache_key)
-    if cached is not None:
-        return cached
+    if not bypass_cache:
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
 
     results: dict[str, pd.DataFrame] = {}
     batches = list(_chunked(tickers, DOWNLOAD_BATCH_SIZE))
@@ -577,6 +579,7 @@ def fetch_multiple_stocks_bulk(
     interval: str = "1d",
     all_idx: bool = True,
     progress_callback=None,
+    bypass_cache: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """
     Bulk-fetch OHLCV data using yf.download() — much faster than individual calls.
@@ -591,9 +594,10 @@ def fetch_multiple_stocks_bulk(
         return {}
 
     cache_key = _cache_key(tickers, period, interval, all_idx)
-    cached = _get_cached(cache_key)
-    if cached is not None:
-        return cached
+    if not bypass_cache:
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
 
     # Only yfinance supports true bulk download; others fall back
     if DATA_PROVIDER != "yfinance":

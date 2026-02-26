@@ -792,6 +792,9 @@ def analyze_ta_only(df: pd.DataFrame, ticker: str) -> TimingSignal:
 def get_all_signals_bulk(
     tickers: Optional[list] = None,
     progress_callback=None,
+    interval: str = "1d",
+    period: Optional[str] = None,
+    bypass_cache: bool = False,
     return_data: bool = False,
 ) -> tuple:
     """
@@ -801,7 +804,13 @@ def get_all_signals_bulk(
     Returns:
         (signals_list, rt_prices_dict, rt_source_label)
     """
-    data = fetch_multiple_stocks_bulk(tickers=tickers, period="3mo", progress_callback=progress_callback)
+    data = fetch_multiple_stocks_bulk(
+        tickers=tickers,
+        period=period,
+        interval=interval,
+        progress_callback=progress_callback,
+        bypass_cache=bypass_cache,
+    )
 
     # Fetch real-time prices for all tickers in one batch
     rt_prices: dict[str, float] = {}
