@@ -451,8 +451,12 @@ def screen_rebound_candidates(
     tickers: Optional[list] = None,
     min_score: float = 50,
     rt_prices: Optional[dict] = None,
+    data: Optional[dict[str, pd.DataFrame]] = None,
 ) -> list:
-    data = fetch_multiple_stocks(tickers=tickers, period="3mo")
+    if data is None:
+        data = fetch_multiple_stocks(tickers=tickers, period="3mo")
+    if not data:
+        return []
 
     # Fetch real-time prices if not supplied
     if rt_prices is None:
@@ -788,7 +792,8 @@ def analyze_ta_only(df: pd.DataFrame, ticker: str) -> TimingSignal:
 def get_all_signals_bulk(
     tickers: Optional[list] = None,
     progress_callback=None,
-) -> tuple[list, dict, str]:
+    return_data: bool = False,
+) -> tuple:
     """
     Bulk-fetch OHLCV data for all tickers using yf.download(), then compute
     TA-only signals (no fundamentals). Much faster for 800+ stocks.
@@ -816,4 +821,6 @@ def get_all_signals_bulk(
         signals.append(sig)
 
     sorted_signals = sorted(signals, key=lambda x: (x.action != "HOLD", -x.confidence))
+    if return_data:
+        return sorted_signals, rt_prices, rt_source_label, data
     return sorted_signals, rt_prices, rt_source_label

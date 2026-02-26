@@ -147,27 +147,40 @@ def _try_idx_api() -> list[str]:
 
 
 def _try_stockanalysis() -> list[str]:
-    """Scrape stockanalysis.com for full IDX ticker list."""
-    try:
-        r = requests.get(
-            STOCKANALYSIS_URL,
-            timeout=20,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml",
-            },
-        )
-        if not r.ok:
-            return []
-        # Tickers appear as /quote/idx/XXXX/ links
-        codes = re.findall(r'/quote/idx/([A-Z]{2,6})/', r.text)
-        if len(codes) > 100:
-            return _dedup([c + ".JK" for c in codes])
-    except Exception:
-        pass
+    """Scrape stockanalysis.com for full IDX ticker list (paged)."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml",
+    }
+    collected: list[str] = []
+    seen: Set[str] = set()
+
+    for page in range(1, 6):  # page 1 + a few extras; stops when empty
+        url = STOCKANALYSIS_URL if page == 1 else f"{STOCKANALYSIS_URL}?page={page}"
+        try:
+            r = requests.get(url, timeout=20, headers=headers)
+            if not r.ok:
+                break
+            # Tickers appear as /quote/idx/XXXX/ links
+            codes = re.findall(r'/quote/idx/([A-Z]{2,6})/', r.text)
+            if not codes:
+                break
+            added = 0
+            for c in codes:
+                if c not in seen:
+                    seen.add(c)
+                    collected.append(c)
+                    added += 1
+            if added == 0:
+                break
+        except Exception:
+            break
+
+    if len(collected) > 100:
+        return _dedup([c + ".JK" for c in collected])
     return []
 
 

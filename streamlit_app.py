@@ -97,8 +97,12 @@ with st.sidebar:
         st.rerun()
 
 # ─── Ticker selection ─────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_all_tickers() -> list[str]:
+    return get_universe(all_idx=True)
+
 if "All IDX" in universe_mode:
-    all_tickers = get_universe(all_idx=True)
+    all_tickers = load_all_tickers()
     tickers = all_tickers if scan_all else all_tickers[:batch_limit]
     st.sidebar.write(f"Scanning {len(tickers)} of {len(all_tickers)} IDX stocks.")
 else:
@@ -109,14 +113,7 @@ else:
 @st.cache_data(ttl=120, show_spinner=False)
 def run_signals(ticker_tuple):
     """Use bulk download + TA-only for fast scanning of many tickers."""
-    return get_all_signals_bulk(tickers=list(ticker_tuple))
-
-@st.cache_data(ttl=120, show_spinner=False)
-def run_rebounds(ticker_tuple, min_score, _rt_prices_tuple):
-    rt_prices = dict(_rt_prices_tuple) if _rt_prices_tuple else {}
-    return screen_rebound_candidates(
-        tickers=list(ticker_tuple), min_score=min_score, rt_prices=rt_prices
-    )
+    return get_all_signals_bulk(tickers=list(ticker_tuple), return_data=True)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def run_single_ticker_analysis(ticker):
@@ -147,12 +144,13 @@ def run_sentiment_sector(sector):
 
 try:
     with st.spinner(f"⏳ Bulk downloading {len(tickers)} stocks & running TA analysis..."):
-        signals, rt_prices, rt_source_label = run_signals(tuple(tickers))
+        signals, rt_prices, rt_source_label, bulk_data = run_signals(tuple(tickers))
         buy_signals  = [s for s in signals if s.action == "BUY"]
         sell_signals = [s for s in signals if s.action == "SELL"]
         hold_signals = [s for s in signals if s.action == "HOLD"]
-        rt_prices_tuple = tuple(sorted(rt_prices.items())) if rt_prices else ()
-        rebounds = run_rebounds(tuple(tickers), min_rebound, rt_prices_tuple)
+        rebounds = screen_rebound_candidates(
+            min_score=min_rebound, rt_prices=rt_prices, data=bulk_data
+        )
 except DataRateLimitError:
     st.error("Data provider rate limit reached. Please wait and try again.")
     st.info("Tips: reduce 'Max stocks to scan', switch to LQ45/core list, or retry in a few minutes.")
