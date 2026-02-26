@@ -3,24 +3,22 @@ Indonesia Stock Trading AI - Streamlit App (Two-Tab Layout)
 Tab 1: Ticker Search & Deep Analysis (Valuation, Sentiment, Catalysts)
 Tab 2: Sector Overview (Grouped view with ownership, color-coded signals)
 """
+from __future__ import annotations
 import streamlit as st
 import pandas as pd
 import time
 import warnings
 from datetime import datetime
-from data_fetcher import DataProviderError, DataRateLimitError
+from data_fetcher import (
+    DataProviderError,
+    DataRateLimitError,
+    fetch_stock_data,
+    fetch_realtime_prices,
+    update_last_candle_with_realtime,
+)
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-from analyzer import (
-    get_all_signals,
-    get_all_signals_bulk,
-    analyze_buy_sell_timing,
-    screen_rebound_candidates,
-    TimingSignal,
-    ReboundCandidate,
-)
-from data_fetcher import fetch_stock_data, fetch_realtime_prices, update_last_candle_with_realtime
 from universe import get_universe
 from config import IDX_STOCKS
 from sentiment import fetch_ticker_sentiment, fetch_sector_sentiment, sentiment_summary
@@ -30,6 +28,20 @@ st.set_page_config(
     page_icon="📈",
     layout="wide",
 )
+
+try:
+    from analyzer import (
+        get_all_signals,
+        get_all_signals_bulk,
+        analyze_buy_sell_timing,
+        screen_rebound_candidates,
+        TimingSignal,
+        ReboundCandidate,
+    )
+except Exception as exc:
+    st.error("Failed to import analysis modules. The app cannot start.")
+    st.exception(exc)
+    st.stop()
 
 st.title("📈 Indonesia Stock Trading AI")
 st.caption(

@@ -1,6 +1,7 @@
 """
 Trading AI Analyzer - Enhanced with comprehensive TA + Fundamentals
 """
+from __future__ import annotations
 import pandas as pd
 import numpy as np
 from typing import Optional

@@ -2,6 +2,7 @@
 Indonesia Stock Trading AI - Main Entry Point
 Real-time tracking with Stochastic RSI and Smart Money accumulation analysis
 """
+from __future__ import annotations
 import sys
 import io
 import warnings

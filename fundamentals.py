@@ -8,7 +8,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-import yfinance as yf
+try:
+    import yfinance as yf
+    _YFINANCE_IMPORT_ERROR: Optional[Exception] = None
+except Exception as exc:
+    # Keep the app running even if yfinance is unavailable on the host.
+    yf = None  # type: ignore[assignment]
+    _YFINANCE_IMPORT_ERROR = exc
 
 
 @dataclass
@@ -88,6 +94,9 @@ def _fetch_ownership(t: yf.Ticker) -> str:
 
 
 def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
+    if yf is None:
+        return FundamentalSnapshot()
+
     t = yf.Ticker(ticker)
     try:
         info = t.get_info()
