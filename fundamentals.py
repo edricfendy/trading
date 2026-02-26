@@ -19,7 +19,7 @@ class FundamentalSnapshot:
     per_forward: Optional[float] = None    # Forward PER
     peg_ratio: Optional[float] = None      # PEG ratio
     book_value_per_share: Optional[float] = None  # Book value per share
-    valuation_price: Optional[float] = None       # PBV × BV/share (fair value estimate)
+    valuation_price: Optional[float] = None       # PER × EPS TTM (fair value estimate)
 
     # Profitability
     revenue: Optional[float] = None
@@ -106,11 +106,17 @@ def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
     per_forward = info.get("forwardPE")
     peg = info.get("pegRatio") or info.get("trailingPegRatio")
 
-    # Book value per share and valuation price
+    # Book value per share
     bvps = info.get("bookValue")
+
+    # EPS (needed for valuation price calculation)
+    eps = info.get("trailingEps")
+    eps_fwd = info.get("forwardEps")
+
+    # Valuation price = PER × EPS (TTM)
     valuation_price: Optional[float] = None
-    if pbv is not None and bvps is not None and bvps > 0:
-        valuation_price = pbv * bvps
+    if per is not None and eps is not None and eps > 0:
+        valuation_price = per * eps
 
     # Profitability
     revenue = info.get("totalRevenue")
@@ -119,8 +125,6 @@ def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
     profit_margins = info.get("profitMargins")
     roe = info.get("returnOnEquity")
     roa = info.get("returnOnAssets")
-    eps = info.get("trailingEps")
-    eps_fwd = info.get("forwardEps")
 
     # Rough ROIC = EBIT*(1-tax) / (Debt + Equity)
     ebit = info.get("ebit")

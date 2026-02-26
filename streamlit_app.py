@@ -280,10 +280,10 @@ with tab1:
             st.markdown("### 💰 Valuation Analysis")
             v_cols = st.columns(5)
             v_cols[0].metric("Current Price", _rp(sig.price))
-            v_cols[1].metric("Book Value/Share", _rp(sig.book_value_per_share))
-            v_cols[2].metric("PBV", _fmt(sig.pbv, ".2f", "x") if sig.pbv else "-")
+            v_cols[1].metric("PER", _fmt(sig.per, ".1f", "x") if sig.per else "-")
+            v_cols[2].metric("EPS (TTM)", _fmt(sig.eps, ",.0f", " Rp") if sig.eps else "-")
             v_cols[3].metric("Valuation Price", _rp(sig.valuation_price))
-            v_cols[4].metric("PER", _fmt(sig.per, ".1f", "x") if sig.per else "-")
+            v_cols[4].metric("PBV", _fmt(sig.pbv, ".2f", "x") if sig.pbv else "-")
 
             # Cheap/Expensive label
             if sig.price_vs_valuation:
@@ -292,9 +292,9 @@ with tab1:
                     diff = sig.price - sig.valuation_price
                     diff_pct = (diff / sig.valuation_price) * 100
                     direction = "above" if diff > 0 else "below"
-                    st.caption(f"Current price is Rp {abs(diff):,.0f} ({abs(diff_pct):.1f}%) {direction} the PBV-implied fair value")
+                    st.caption(f"Current price is Rp {abs(diff):,.0f} ({abs(diff_pct):.1f}%) {direction} the PER-implied fair value")
             else:
-                st.caption("Valuation price unavailable (missing book value data)")
+                st.caption("Valuation price unavailable (missing PER or EPS data)")
 
             # ─── Action & Confidence ─────────────────────────────────────
             st.markdown("### 🎯 Signal")
@@ -748,7 +748,7 @@ with st.expander("📖 Indicator & Signal Guide"):
         - **Free Float > 40%** → ✅ good market liquidity
 
         **Valuation Price**
-        - **Valuation Price** = PBV × Book Value per Share
+        - **Valuation Price** = PER × EPS (TTM)
         - If **Current Price < Valuation Price** → CHEAP
         - If **Current Price > Valuation Price** → EXPENSIVE
 

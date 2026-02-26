@@ -60,7 +60,7 @@ class TimingSignal:
     industry: Optional[str]
     # Valuation pricing
     book_value_per_share: Optional[float]
-    valuation_price: Optional[float]       # PBV × BV/share
+    valuation_price: Optional[float]       # PER × EPS (TTM)
     price_vs_valuation: Optional[str]      # CHEAP / EXPENSIVE / FAIR
     # Identity / Ownership
     company_name: Optional[str]
