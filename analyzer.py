@@ -58,6 +58,13 @@ class TimingSignal:
     valuation_label: str
     sector: Optional[str]
     industry: Optional[str]
+    # Valuation pricing
+    book_value_per_share: Optional[float]
+    valuation_price: Optional[float]       # PBV × BV/share
+    price_vs_valuation: Optional[str]      # CHEAP / EXPENSIVE / FAIR
+    # Identity / Ownership
+    company_name: Optional[str]
+    major_holders: Optional[str]
     # Levels
     take_profit: Optional[float]
     stop_loss: Optional[float]
@@ -200,6 +207,8 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
             gross_margins=None, profit_margins=None, dividend_yield=None,
             free_float_ratio=None, market_cap=None, valuation_label="unknown",
             sector=None, industry=None,
+            book_value_per_share=None, valuation_price=None,
+            price_vs_valuation=None, company_name=None, major_holders=None,
             take_profit=None, stop_loss=None, price=0.0, timestamp=now,
         )
 
@@ -422,6 +431,15 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
         free_float_ratio=f.free_float_ratio, market_cap=f.market_cap,
         valuation_label=label,
         sector=f.sector, industry=f.industry,
+        book_value_per_share=f.book_value_per_share,
+        valuation_price=f.valuation_price,
+        price_vs_valuation=(
+            "CHEAP" if f.valuation_price and price < f.valuation_price
+            else "EXPENSIVE" if f.valuation_price and price > f.valuation_price
+            else None
+        ),
+        company_name=f.company_name,
+        major_holders=f.major_holders,
         take_profit=tp, stop_loss=sl,
         price=price,
         timestamp=latest.name.isoformat() if hasattr(latest.name, "isoformat") else str(latest.name),

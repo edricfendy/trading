@@ -18,6 +18,8 @@ class FundamentalSnapshot:
     per: Optional[float] = None            # Price / Earnings (trailing)
     per_forward: Optional[float] = None    # Forward PER
     peg_ratio: Optional[float] = None      # PEG ratio
+    book_value_per_share: Optional[float] = None  # Book value per share
+    valuation_price: Optional[float] = None       # PBV × BV/share (fair value estimate)
 
     # Profitability
     revenue: Optional[float] = None
@@ -54,12 +56,35 @@ class FundamentalSnapshot:
     # Classification
     sector: Optional[str] = None
     industry: Optional[str] = None
+    # Identity / Ownership
+    company_name: Optional[str] = None
+    major_holders: Optional[str] = None    # comma-separated major holder names
 
 
 def _safe_div(num: Optional[float], den: Optional[float]) -> Optional[float]:
     if num is None or den in (None, 0):
         return None
     return num / den
+
+
+def _fetch_ownership(t: yf.Ticker) -> str:
+    """Extract major holder names from yfinance, return comma-separated."""
+    try:
+        holders = t.institutional_holders
+        if holders is not None and not holders.empty:
+            names = holders["Holder"].head(5).tolist()
+            return ", ".join(str(n) for n in names if n)
+    except Exception:
+        pass
+    try:
+        holders = t.major_holders
+        if holders is not None and not holders.empty:
+            # major_holders is a 2-col DataFrame; extract values
+            names = holders.iloc[:, 1].tolist()
+            return ", ".join(str(n) for n in names if n)
+    except Exception:
+        pass
+    return ""
 
 
 def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
@@ -80,6 +105,12 @@ def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
     per = info.get("trailingPE")
     per_forward = info.get("forwardPE")
     peg = info.get("pegRatio") or info.get("trailingPegRatio")
+
+    # Book value per share and valuation price
+    bvps = info.get("bookValue")
+    valuation_price: Optional[float] = None
+    if pbv is not None and bvps is not None and bvps > 0:
+        valuation_price = pbv * bvps
 
     # Profitability
     revenue = info.get("totalRevenue")
@@ -132,11 +163,17 @@ def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
     sector = info.get("sector") or info.get("sectorDisp")
     industry = info.get("industry") or info.get("industryDisp")
 
+    # Identity / Ownership
+    company_name = info.get("longName") or info.get("shortName") or ""
+    major_holders = _fetch_ownership(t)
+
     return FundamentalSnapshot(
         pbv=pbv,
         per=per,
         per_forward=per_forward,
         peg_ratio=peg,
+        book_value_per_share=bvps,
+        valuation_price=valuation_price,
         revenue=revenue,
         gross_margins=gross_margins,
         operating_margins=op_margins,
@@ -162,4 +199,6 @@ def fetch_fundamentals(ticker: str) -> FundamentalSnapshot:
         dividend_yield=div_yield,
         sector=sector,
         industry=industry,
+        company_name=company_name,
+        major_holders=major_holders,
     )
