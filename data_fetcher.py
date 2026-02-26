@@ -567,6 +567,95 @@ def fetch_multiple_stocks(
     return results
 
 
+BULK_BATCH_SIZE = 100  # yf.download handles up to ~100 tickers well per call
+
+
+def fetch_multiple_stocks_bulk(
+    tickers: Optional[list[str]] = None,
+    period: Optional[str] = "3mo",
+    interval: str = "1d",
+    all_idx: bool = True,
+    progress_callback=None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Bulk-fetch OHLCV data using yf.download() — much faster than individual calls.
+    Downloads all tickers in a single API call (batched by ~100 for reliability).
+    Falls back to individual fetching for non-yfinance providers.
+    """
+    if tickers is None:
+        tickers = get_universe(all_idx=all_idx)
+
+    tickers = [t for t in (tickers or []) if isinstance(t, str) and t.strip()]
+    if not tickers:
+        return {}
+
+    cache_key = _cache_key(tickers, period, interval, all_idx)
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    # Only yfinance supports true bulk download; others fall back
+    if DATA_PROVIDER != "yfinance":
+        return fetch_multiple_stocks(tickers, period, interval, all_idx)
+
+    period = _resolve_period(period, interval)
+    results: dict[str, pd.DataFrame] = {}
+    batches = list(_chunked(tickers, BULK_BATCH_SIZE))
+
+    for i, batch in enumerate(batches):
+        if progress_callback:
+            progress_callback(i, len(batches))
+        try:
+            raw = yf.download(
+                batch,
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                threads=True,
+                progress=False,
+            )
+            if raw is None or raw.empty:
+                continue
+
+            # yf.download returns MultiIndex columns when > 1 ticker
+            if isinstance(raw.columns, pd.MultiIndex):
+                # Columns are (Price, Ticker)
+                for ticker in batch:
+                    try:
+                        df_t = raw.xs(ticker, level=1, axis=1).copy()
+                        df_t.columns = [c.lower() for c in df_t.columns]
+                        keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df_t.columns]
+                        if len(keep) >= 4:
+                            df_t = df_t[keep].dropna(how="all")
+                            if not df_t.empty and len(df_t) >= 30:
+                                results[ticker] = df_t
+                    except (KeyError, Exception):
+                        continue
+            else:
+                # Single ticker returned flat columns
+                ticker = batch[0]
+                df_t = raw.copy()
+                df_t.columns = [c.lower() for c in df_t.columns]
+                keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df_t.columns]
+                if len(keep) >= 4:
+                    df_t = df_t[keep].dropna(how="all")
+                    if not df_t.empty and len(df_t) >= 30:
+                        results[ticker] = df_t
+        except Exception:
+            # Fallback: try individual download for this batch
+            try:
+                batch_data = _download_yfinance_batch(batch, period, interval)
+                results.update(batch_data)
+            except Exception:
+                continue
+
+        if i < len(batches) - 1:
+            time.sleep(0.5)  # Brief pause between bulk batches
+
+    _set_cached(cache_key, results)
+    return results
+
+
 def fetch_intraday(ticker: str, interval: str = "1h") -> pd.DataFrame:
     """
     Fetch intraday data for shorter-term analysis.
@@ -671,7 +760,7 @@ def fetch_realtime_prices(tickers: list[str]) -> tuple[dict[str, float], str]:
             return ticker, price, "yahoo"
         return ticker, None, "none"
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         futures = {executor.submit(_fetch_one, t): t for t in tickers}
         for future in as_completed(futures):
             try:

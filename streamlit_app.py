@@ -14,6 +14,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 from analyzer import (
     get_all_signals,
+    get_all_signals_bulk,
     analyze_buy_sell_timing,
     screen_rebound_candidates,
     TimingSignal,
@@ -46,10 +47,10 @@ with st.sidebar:
     )
     batch_limit = st.slider(
         "Max stocks to scan",
-        min_value=10, max_value=200,
-        value=50 if "All IDX" in universe_mode else 26,
-        step=10,
-        help="Limit for 'All IDX' mode to avoid rate limits",
+        min_value=10, max_value=1000,
+        value=200 if "All IDX" in universe_mode else 26,
+        step=50,
+        help="Limit for 'All IDX' mode. Use bulk download for 200+ stocks.",
     )
     scan_all = False
     if "All IDX" in universe_mode:
@@ -95,7 +96,8 @@ else:
 # ─── Run analysis ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=120, show_spinner=False)
 def run_signals(ticker_tuple):
-    return get_all_signals(tickers=list(ticker_tuple))
+    """Use bulk download + TA-only for fast scanning of many tickers."""
+    return get_all_signals_bulk(tickers=list(ticker_tuple))
 
 @st.cache_data(ttl=120, show_spinner=False)
 def run_rebounds(ticker_tuple, min_score, _rt_prices_tuple):
@@ -132,7 +134,7 @@ def run_sentiment_sector(sector):
 
 
 try:
-    with st.spinner("⏳ Loading stock data, fetching real-time prices, and running analysis..."):
+    with st.spinner(f"⏳ Bulk downloading {len(tickers)} stocks & running TA analysis..."):
         signals, rt_prices, rt_source_label = run_signals(tuple(tickers))
         buy_signals  = [s for s in signals if s.action == "BUY"]
         sell_signals = [s for s in signals if s.action == "SELL"]
@@ -403,9 +405,10 @@ with tab1:
         # Show summary metrics
         st.markdown("### 📊 Market Overview")
         if rt_source_label:
-            st.caption(f"📡 **Live prices + indicators**: {rt_source_label} | Real-time prices injected into OHLCV before indicator calculation")
+            st.caption(f"📡 **Live prices + indicators**: {rt_source_label} | Bulk download mode")
         else:
-            st.caption("📊 Prices & Indicators: yfinance (may be ~15-min delayed)")
+            st.caption("📊 Prices & Indicators: yfinance bulk download (may be ~15-min delayed)")
+        st.info("💡 **Tip**: Fundamentals (PER, ROE, etc.) are loaded on-demand when you select a ticker above. Overview shows TA signals only for speed.")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("🟢 BUY", len(buy_signals))
