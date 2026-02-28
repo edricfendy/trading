@@ -20,7 +20,6 @@ from data_fetcher import (
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 from universe import get_universe
-from config import IDX_STOCKS
 from sentiment import fetch_ticker_sentiment, fetch_sector_sentiment, sentiment_summary
 
 st.set_page_config(
@@ -54,8 +53,8 @@ with st.sidebar:
     st.header("⚙️ Settings")
     universe_mode = st.radio(
         "Universe",
-        ["All IDX stocks (~800+)", "LQ45 / core list (26)"],
-        index=1,
+        ["All IDX stocks (~800+)"],
+        index=0,
     )
     ta_interval = st.selectbox(
         "TA Interval",
@@ -66,7 +65,7 @@ with st.sidebar:
     batch_limit = st.slider(
         "Max stocks to scan",
         min_value=10, max_value=1000,
-        value=200 if "All IDX" in universe_mode else 26,
+        value=50,
         step=50,
         help="Limit for 'All IDX' mode. Use bulk download for 200+ stocks.",
     )
@@ -117,8 +116,6 @@ if "All IDX" in universe_mode:
     all_tickers = load_all_tickers()
     tickers = all_tickers if scan_all else all_tickers[:batch_limit]
     st.sidebar.write(f"Scanning {len(tickers)} of {len(all_tickers)} IDX stocks.")
-else:
-    tickers = list(IDX_STOCKS)
 
 
 # ─── Run analysis ─────────────────────────────────────────────────────────────
@@ -177,7 +174,7 @@ try:
             st.session_state["force_refresh"] = False
 except DataRateLimitError:
     st.error("Data provider rate limit reached. Please wait and try again.")
-    st.info("Tips: reduce 'Max stocks to scan', switch to LQ45/core list, or retry in a few minutes.")
+    st.info("Tips: reduce 'Max stocks to scan' or retry in a few minutes.")
     st.stop()
 except DataProviderError as exc:
     st.error(f"Data provider error: {exc}")
