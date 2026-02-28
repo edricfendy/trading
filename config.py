@@ -37,6 +37,7 @@ GOAPI_API_KEY = os.getenv("GOAPI_API_KEY", "").strip()
 GOAPI_BASE_URL = os.getenv("GOAPI_BASE_URL", "https://api.goapi.id/v1").strip().rstrip("/")
 GOAPI_OHLCV_ENDPOINT = os.getenv("GOAPI_OHLCV_ENDPOINT", "/stock/idx/{symbol}/historical").strip()
 GOAPI_QUOTE_ENDPOINT = os.getenv("GOAPI_QUOTE_ENDPOINT", "/stock/idx/prices").strip()
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "").strip()
 
 # Signal thresholds
 OVERSOLD_THRESHOLD = 20

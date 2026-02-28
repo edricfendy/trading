@@ -31,6 +31,12 @@ DATA_CACHE_TTL_SEC = int(os.getenv("DATA_CACHE_TTL_SEC", "30"))
 TWELVEDATA_MAX_RETRIES = int(os.getenv("TWELVEDATA_MAX_RETRIES", "2"))
 TWELVEDATA_RETRY_BACKOFF_SEC = float(os.getenv("TWELVEDATA_RETRY_BACKOFF_SEC", "2.0"))
 GOAPI_SLEEP_BETWEEN_CALLS_SEC = float(os.getenv("GOAPI_SLEEP_BETWEEN_CALLS_SEC", "0.2"))
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "").strip()
+ALPHAVANTAGE_BASE_URL = "https://www.alphavantage.co/query"
+ALPHAVANTAGE_MAX_RETRIES = int(os.getenv("ALPHAVANTAGE_MAX_RETRIES", "2"))
+ALPHAVANTAGE_RETRY_BACKOFF_SEC = float(os.getenv("ALPHAVANTAGE_RETRY_BACKOFF_SEC", "2.0"))
+YF_MAX_RETRIES = int(os.getenv("YF_MAX_RETRIES", "3"))
+YF_RETRY_BACKOFF_SEC = float(os.getenv("YF_RETRY_BACKOFF_SEC", "1.0"))
 
 _CACHE: dict[tuple, tuple[float, dict[str, pd.DataFrame]]] = {}
 
@@ -108,23 +114,35 @@ def _download_yfinance_batch(
     yf_interval = yf_interval_map.get(interval, "1d")
 
     for ticker in tickers:
-        try:
-            t = yf.Ticker(ticker)
-            df = t.history(period=period, interval=yf_interval, auto_adjust=True)
-            if df is not None and not df.empty:
-                df = df.rename(columns=str.lower)
-                # Ensure standard column names
-                col_map = {"stock splits": "stock_splits"}
-                df = df.rename(columns=col_map)
-                # Keep only OHLCV columns
-                keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
-                if len(keep) >= 4:  # at least OHLC
-                    df = df[keep]
-                    df = _normalize_ohlcv(df)
-                    if not df.empty:
-                        results[ticker] = df
-        except Exception:
-            continue
+        for attempt in range(YF_MAX_RETRIES + 1):
+            try:
+                t = yf.Ticker(ticker)
+                df = t.history(period=period, interval=yf_interval, auto_adjust=True, proxy=None, prepost=True)
+                if df is not None and not df.empty:
+                    df = df.rename(columns=str.lower)
+                    # Ensure standard column names
+                    col_map = {"stock splits": "stock_splits"}
+                    df = df.rename(columns=col_map)
+                    # Keep only OHLCV columns
+                    keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
+                    if len(keep) >= 4:  # at least OHLC
+                        df = df[keep]
+                        df = _normalize_ohlcv(df)
+                        if not df.empty:
+                            results[ticker] = df
+                            break
+                # If we get here with no data, but it's not the last attempt, retry
+                if df is None or df.empty:
+                    if attempt < YF_MAX_RETRIES:
+                        time.sleep(YF_RETRY_BACKOFF_SEC * (2**attempt))
+                        continue
+                    break
+                break
+            except Exception as e:
+                if attempt < YF_MAX_RETRIES:
+                    time.sleep(YF_RETRY_BACKOFF_SEC * (2**attempt))
+                    continue
+                break
 
     return results
 
@@ -145,6 +163,8 @@ def _download_batch(
         return _download_twelvedata_batch(tickers, period, interval)
     if DATA_PROVIDER == "goapi":
         return _download_goapi_batch(tickers, period, interval)
+    if DATA_PROVIDER == "alphavantage":
+        return _download_alphavantage_batch(tickers, period, interval)
 
     raise DataProviderError(f"Unsupported DATA_PROVIDER: {DATA_PROVIDER}")
 
@@ -168,11 +188,35 @@ def _td_interval(interval: str) -> str:
     return mapping[interval]
 
 
+def _av_interval(interval: str) -> str:
+    mapping = {
+        "1m": "1min",
+        "5m": "5min",
+        "15m": "15min",
+        "30m": "30min",
+        "60m": "60min",
+        "1h": "60min",
+        "1d": "daily",
+        "1wk": "weekly",
+        "1mo": "monthly"
+    }
+    if interval not in mapping:
+        raise DataProviderError(f"Unsupported interval for Alpha Vantage: {interval}")
+    return mapping[interval]
+
+
 def _td_symbol(ticker: str) -> str:
     if ":" in ticker:
         return ticker
     if ticker.endswith(".JK"):
         return f"{ticker[:-3]}:IDX"
+    return ticker
+
+
+def _av_symbol(ticker: str) -> str:
+    if ticker.endswith(".JK"):
+        # For Indonesia stocks, Alpha Vantage uses .JK extension
+        return ticker
     return ticker
 
 
@@ -304,6 +348,167 @@ def _download_twelvedata_batch(
             if not df.empty:
                 results[ticker] = df
 
+    return results
+
+
+def _parse_alphavantage_payload(function: str, payload: dict) -> pd.DataFrame:
+    """Parse AlphaVantage API response into a DataFrame."""
+    # Different keys depending on function
+    if function.startswith("TIME_SERIES_INTRADAY"):
+        metadata_key = "Meta Data"
+        data_key = [key for key in payload.keys() if key.startswith("Time Series")]
+        data_key = data_key[0] if data_key else None
+    elif function == "TIME_SERIES_DAILY":
+        data_key = "Time Series (Daily)"
+    elif function == "TIME_SERIES_WEEKLY":
+        data_key = "Weekly Time Series"
+    elif function == "TIME_SERIES_MONTHLY":
+        data_key = "Monthly Time Series"
+    else:
+        return pd.DataFrame()  # Unsupported function
+    
+    if data_key not in payload:
+        return pd.DataFrame()
+
+    # Convert time series to DataFrame
+    data = payload[data_key]
+    df = pd.DataFrame.from_dict(data, orient='index')
+    
+    # Rename columns to standard OHLCV
+    col_map = {
+        "1. open": "open", "2. high": "high", "3. low": "low", "4. close": "close",
+        "5. volume": "volume", "5. adjusted close": "adjusted_close"
+    }
+    df.rename(columns=col_map, inplace=True)
+    
+    # Convert index to datetime
+    df.index = pd.to_datetime(df.index)
+    df.sort_index(inplace=True)
+    
+    # Convert values to numeric
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Make sure we have the standard columns
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col not in df.columns:
+            df[col] = 0.0
+    
+    # Keep only standard OHLCV columns
+    keep = ["open", "high", "low", "close", "volume"]
+    if all(col in df.columns for col in keep):
+        df = df[keep]
+        return _normalize_ohlcv(df)
+    
+    return pd.DataFrame()
+
+
+def _raise_alphavantage_error(resp: requests.Response, payload: dict) -> None:
+    """Check for Alpha Vantage API errors and raise appropriate exception."""
+    if resp.status_code == 429:
+        raise DataRateLimitError("Alpha Vantage rate limit reached.")
+    
+    # Alpha Vantage returns error messages in the "Note" or "Error Message" key
+    if "Note" in payload and "call frequency" in payload["Note"]:
+        raise DataRateLimitError(f"Alpha Vantage: {payload['Note']}")
+    
+    if "Error Message" in payload:
+        raise DataProviderError(f"Alpha Vantage: {payload['Error Message']}")
+    
+    if resp.status_code >= 400:
+        raise DataProviderError(f"Alpha Vantage HTTP {resp.status_code}.")
+
+
+def _download_alphavantage_batch(
+    tickers: list[str],
+    period: Optional[str],
+    interval: str,
+) -> dict[str, pd.DataFrame]:
+    """Download OHLCV data from Alpha Vantage API."""
+    if not ALPHAVANTAGE_API_KEY:
+        raise DataProviderError("ALPHAVANTAGE_API_KEY is not set.")
+
+    results: dict[str, pd.DataFrame] = {}
+    
+    # Alpha Vantage doesn't support batch downloads, so we need to do one ticker at a time
+    for ticker in tickers:
+        symbol = _av_symbol(ticker)
+        av_interval = _av_interval(interval)
+        
+        # Different functions for different intervals
+        if interval in _INTRADAY_INTERVALS:
+            function = "TIME_SERIES_INTRADAY"
+            params = {
+                "function": function,
+                "symbol": symbol,
+                "interval": av_interval,
+                "outputsize": "full" if interval == "1m" else "compact",
+                "apikey": ALPHAVANTAGE_API_KEY,
+            }
+        elif interval == "1d":
+            function = "TIME_SERIES_DAILY"
+            params = {
+                "function": function,
+                "symbol": symbol,
+                "outputsize": "full",  # Get all available data
+                "apikey": ALPHAVANTAGE_API_KEY,
+            }
+        elif interval == "1wk":
+            function = "TIME_SERIES_WEEKLY"
+            params = {
+                "function": function,
+                "symbol": symbol,
+                "apikey": ALPHAVANTAGE_API_KEY,
+            }
+        elif interval == "1mo":
+            function = "TIME_SERIES_MONTHLY"
+            params = {
+                "function": function,
+                "symbol": symbol,
+                "apikey": ALPHAVANTAGE_API_KEY,
+            }
+        else:
+            continue  # Skip unsupported intervals
+        
+        for attempt in range(ALPHAVANTAGE_MAX_RETRIES + 1):
+            try:
+                resp = requests.get(ALPHAVANTAGE_BASE_URL, params=params, timeout=20)
+                
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    if attempt < ALPHAVANTAGE_MAX_RETRIES:
+                        time.sleep(ALPHAVANTAGE_RETRY_BACKOFF_SEC * (2**attempt))
+                        continue
+                    raise DataProviderError("Alpha Vantage returned non-JSON response.")
+                
+                # Check for API errors
+                try:
+                    _raise_alphavantage_error(resp, payload)
+                except DataRateLimitError:
+                    if attempt < ALPHAVANTAGE_MAX_RETRIES:
+                        time.sleep(ALPHAVANTAGE_RETRY_BACKOFF_SEC * (2**attempt) + 5)  # Add extra delay for rate limits
+                        continue
+                    raise
+                
+                # Parse the response
+                df = _parse_alphavantage_payload(function, payload)
+                if not df.empty:
+                    results[ticker] = df
+                
+                # Alpha Vantage has strict rate limits, so add a delay between requests
+                if ticker != tickers[-1]:
+                    time.sleep(1.0)  # Sleep 1 second between requests to avoid rate limits
+                
+                break  # Success, break retry loop
+                
+            except (requests.RequestException, ValueError) as e:
+                if attempt < ALPHAVANTAGE_MAX_RETRIES:
+                    time.sleep(ALPHAVANTAGE_RETRY_BACKOFF_SEC * (2**attempt))
+                    continue
+                # Skip this ticker on final failure
+                break
+    
     return results
 
 
@@ -501,314 +706,102 @@ def _download_goapi_batch(
         if not df.empty:
             results[ticker] = df
 
-        if i < len(tickers) - 1 and GOAPI_SLEEP_BETWEEN_CALLS_SEC > 0:
+        if i > 0 and (i + 1) < len(tickers):
             time.sleep(GOAPI_SLEEP_BETWEEN_CALLS_SEC)
 
     return results
 
 
-def fetch_stock_data(
-    ticker: str,
-    period: Optional[str] = "3mo",
-    interval: str = "1d",
-) -> pd.DataFrame:
-    """
-    Fetch OHLCV data for a single Indonesia stock.
-    ticker should include .JK suffix (e.g., BBCA.JK)
-    """
-    try:
-        batch = _download_batch([ticker], period=period, interval=interval)
-    except DataRateLimitError:
-        raise
-
-    df = batch.get(ticker, pd.DataFrame())
-    if df.empty or len(df) < 30:
-        return pd.DataFrame()
-    return df
-
-
-def fetch_multiple_stocks(
-    tickers: Optional[list[str]] = None,
-    period: Optional[str] = "3mo",
-    interval: str = "1d",
-    all_idx: bool = True,
-    bypass_cache: bool = False,
-) -> dict[str, pd.DataFrame]:
-    """
-    Fetch data for multiple Indonesia stocks.
-    If tickers is None, uses:
-      - all_idx=True: dynamic full IDX universe (fallback to IDX_STOCKS)
-      - all_idx=False: static IDX_STOCKS list only
-    Returns dict of {ticker: DataFrame}
-    """
-    if tickers is None:
-        tickers = get_universe(all_idx=all_idx)
-
-    tickers = [t for t in (tickers or []) if isinstance(t, str) and t.strip()]
-    if not tickers:
-        return {}
-
-    cache_key = _cache_key(tickers, period, interval, all_idx)
-    if not bypass_cache:
-        cached = _get_cached(cache_key)
-        if cached is not None:
-            return cached
-
-    results: dict[str, pd.DataFrame] = {}
+def _fetch_symbols_batch(tickers: list[str], period: str, interval: str) -> dict[str, pd.DataFrame]:
+    """Fetch multiple symbols in parallel, using appropriate batch size."""
+    all_results: dict[str, pd.DataFrame] = {}
     batches = list(_chunked(tickers, DOWNLOAD_BATCH_SIZE))
-    for i, batch in enumerate(batches):
-        try:
-            batch_data = _download_batch(batch, period=period, interval=interval)
-        except DataRateLimitError:
-            # bubble up to UI for a friendly message
-            raise
-        results.update(batch_data)
-        if i < len(batches) - 1:
-            time.sleep(SLEEP_BETWEEN_BATCHES_SEC)
 
-    _set_cached(cache_key, results)
-    return results
+    if len(batches) <= 1:
+        return _download_batch(tickers, period, interval)
 
-
-BULK_BATCH_SIZE = 100  # yf.download handles up to ~100 tickers well per call
-
-
-def fetch_multiple_stocks_bulk(
-    tickers: Optional[list[str]] = None,
-    period: Optional[str] = "3mo",
-    interval: str = "1d",
-    all_idx: bool = True,
-    progress_callback=None,
-    bypass_cache: bool = False,
-) -> dict[str, pd.DataFrame]:
-    """
-    Bulk-fetch OHLCV data using yf.download() — much faster than individual calls.
-    Downloads all tickers in a single API call (batched by ~100 for reliability).
-    Falls back to individual fetching for non-yfinance providers.
-    """
-    if tickers is None:
-        tickers = get_universe(all_idx=all_idx)
-
-    tickers = [t for t in (tickers or []) if isinstance(t, str) and t.strip()]
-    if not tickers:
-        return {}
-
-    cache_key = _cache_key(tickers, period, interval, all_idx)
-    if not bypass_cache:
-        cached = _get_cached(cache_key)
-        if cached is not None:
-            return cached
-
-    # Only yfinance supports true bulk download; others fall back
-    if DATA_PROVIDER != "yfinance":
-        return fetch_multiple_stocks(tickers, period, interval, all_idx)
-
-    period = _resolve_period(period, interval)
-    results: dict[str, pd.DataFrame] = {}
-    batches = list(_chunked(tickers, BULK_BATCH_SIZE))
-
-    for i, batch in enumerate(batches):
-        if progress_callback:
-            progress_callback(i, len(batches))
-        try:
-            raw = yf.download(
-                batch,
-                period=period,
-                interval=interval,
-                auto_adjust=True,
-                threads=True,
-                progress=False,
+    with ThreadPoolExecutor(max_workers=min(8, len(batches))) as executor:
+        futures = []
+        for i, batch in enumerate(batches):
+            futures.append(
+                executor.submit(_download_batch, batch, period, interval)
             )
-            if raw is None or raw.empty:
-                continue
+            if i > 0 and i < len(batches) - 1:
+                time.sleep(SLEEP_BETWEEN_BATCHES_SEC)
 
-            # yf.download returns MultiIndex columns when > 1 ticker
-            if isinstance(raw.columns, pd.MultiIndex):
-                # Columns are (Price, Ticker)
-                for ticker in batch:
-                    try:
-                        df_t = raw.xs(ticker, level=1, axis=1).copy()
-                        df_t.columns = [c.lower() for c in df_t.columns]
-                        keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df_t.columns]
-                        if len(keep) >= 4:
-                            df_t = df_t[keep].dropna(how="all")
-                            if not df_t.empty and len(df_t) >= 30:
-                                results[ticker] = df_t
-                    except (KeyError, Exception):
-                        continue
-            else:
-                # Single ticker returned flat columns
-                ticker = batch[0]
-                df_t = raw.copy()
-                df_t.columns = [c.lower() for c in df_t.columns]
-                keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df_t.columns]
-                if len(keep) >= 4:
-                    df_t = df_t[keep].dropna(how="all")
-                    if not df_t.empty and len(df_t) >= 30:
-                        results[ticker] = df_t
-        except Exception:
-            # Fallback: try individual download for this batch
-            try:
-                batch_data = _download_yfinance_batch(batch, period, interval)
-                results.update(batch_data)
-            except Exception:
-                continue
-
-        if i < len(batches) - 1:
-            time.sleep(0.5)  # Brief pause between bulk batches
-
-    _set_cached(cache_key, results)
-    return results
-
-
-def fetch_intraday(ticker: str, interval: str = "1h") -> pd.DataFrame:
-    """
-    Fetch intraday data for shorter-term analysis.
-    Note: intraday availability depends on the data provider and plan.
-    """
-    try:
-        batch = _download_batch([ticker], period="5d", interval=interval)
-    except DataRateLimitError:
-        raise
-    df = batch.get(ticker, pd.DataFrame())
-    if df.empty:
-        return pd.DataFrame()
-    return df
-
-
-def get_latest_price(ticker: str) -> Optional[float]:
-    """Get latest close price for a ticker"""
-    if DATA_PROVIDER == "goapi":
-        try:
-            price = _goapi_latest_price(ticker)
-            if price is not None:
-                return price
-        except DataProviderError:
-            pass
-    df = fetch_stock_data(ticker, period="5d")
-    if df.empty:
-        return None
-    return float(df["close"].iloc[-1])
-
-
-# ─── Real-time price fetching ────────────────────────────────────────────────
-
-_RT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
-
-
-def _fetch_rt_google(ticker: str) -> Optional[float]:
-    """Fetch real-time price from Google Finance for an IDX stock."""
-    code = ticker.replace(".JK", "").upper()
-    url = f"https://www.google.com/finance/quote/{code}:IDX"
-    try:
-        resp = requests.get(url, timeout=10, headers=_RT_HEADERS)
-        if not resp.ok:
-            return None
-        # Google Finance stores the price in a data-last-price attribute
-        match = re.search(r'data-last-price="([\d.]+)"', resp.text)
-        if match:
-            price = float(match.group(1))
-            return price if price > 0 else None
-    except Exception:
-        return None
-    return None
-
-
-def _fetch_rt_yahoo_chart(ticker: str) -> Optional[float]:
-    """Fetch price from Yahoo Finance chart API (may be ~15-min delayed)."""
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        resp = requests.get(url, timeout=10, headers=_RT_HEADERS)
-        if not resp.ok:
-            return None
-        data = resp.json()
-        result = data.get("chart", {}).get("result")
-        if result and len(result) > 0:
-            meta = result[0].get("meta", {})
-            price = meta.get("regularMarketPrice")
-            if price and float(price) > 0:
-                return float(price)
-    except Exception:
-        return None
-    return None
-
-
-def fetch_realtime_prices(tickers: list[str]) -> tuple[dict[str, float], str]:
-    """
-    Fetch real-time prices for IDX stocks using multiple sources.
-    Priority: Google Finance (real-time) → Yahoo chart API (fallback).
-
-    Returns:
-        (prices_dict, source_label)
-        prices_dict: {ticker: price} for tickers with successful fetch
-        source_label: description of which source provided the data
-    """
-    prices: dict[str, float] = {}
-    google_count = 0
-    yahoo_count = 0
-
-    def _fetch_one(ticker: str) -> tuple[str, Optional[float], str]:
-        # Try Google Finance first (true real-time during market hours)
-        price = _fetch_rt_google(ticker)
-        if price is not None:
-            return ticker, price, "google"
-        # Fallback to Yahoo chart API
-        price = _fetch_rt_yahoo_chart(ticker)
-        if price is not None:
-            return ticker, price, "yahoo"
-        return ticker, None, "none"
-
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(_fetch_one, t): t for t in tickers}
         for future in as_completed(futures):
             try:
-                ticker, price, source = future.result()
-                if price is not None:
-                    prices[ticker] = price
-                    if source == "google":
-                        google_count += 1
-                    elif source == "yahoo":
-                        yahoo_count += 1
+                batch_result = future.result()
+                all_results.update(batch_result)
             except Exception:
-                continue
+                # One batch failing shouldn't fail the entire request
+                pass
 
-    # Build source label
-    parts = []
-    if google_count > 0:
-        parts.append(f"Google Finance: {google_count}")
-    if yahoo_count > 0:
-        parts.append(f"Yahoo Finance: {yahoo_count}")
-    source_label = " | ".join(parts) if parts else "No real-time source"
-
-    return prices, source_label
+    return all_results
 
 
-def update_last_candle_with_realtime(
-    df: pd.DataFrame, rt_price: float
-) -> pd.DataFrame:
+def fetch_ohlcv(
+    tickers: list[str],
+    period: Optional[str] = None,
+    interval: str = "1d",
+    all_idx: bool = False,
+) -> dict[str, pd.DataFrame]:
     """
-    Patch the last candle of an OHLCV DataFrame with a real-time price.
+    Fetches OHLCV (Open, High, Low, Close, Volume) time series for the specified tickers.
 
-    Updates close to the live price and adjusts high/low if the live price
-    exceeds the historical range. This ensures that all indicators computed
-    on this DataFrame reflect the most recent market price.
+    Args:
+        tickers: List of ticker symbols e.g. ["BBCA.JK", "BBRI.JK"]
+        period: Time period (e.g., "1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y")
+        interval: Data interval ("1m", "5m", "15m", "30m", "60m", "1h", "1d", "1wk", "1mo")
+        all_idx: If True and tickers is empty, fetch all IDX stocks
+
+    Returns:
+        Dict of DataFrames with OHLCV data, keyed by ticker symbol
     """
-    if df is None or df.empty or rt_price is None or rt_price <= 0:
-        return df
+    if not tickers and not all_idx:
+        return {}
 
-    df = df.copy()
-    idx = df.index[-1]
-    df.loc[idx, "close"] = rt_price
-    # Extend high/low if the real-time price broke intraday range
-    if rt_price > df.loc[idx, "high"]:
-        df.loc[idx, "high"] = rt_price
-    if rt_price < df.loc[idx, "low"]:
-        df.loc[idx, "low"] = rt_price
-    return df
+    # If no tickers provided, load all stocks
+    effective_tickers = tickers
+    if not tickers and all_idx:
+        effective_tickers = get_universe(include_all_idx=True)
+    if not effective_tickers:
+        return {}
+
+    # Check cache first
+    cache_key = _cache_key(effective_tickers, period, interval, all_idx)
+    cached = _get_cached(cache_key)
+    if cached:
+        return cached
+
+    results = _fetch_symbols_batch(effective_tickers, period, interval)
+    if results:
+        _set_cached(cache_key, results)
+    return results
+
+
+def get_latest_quotes(tickers: list[str]) -> dict[str, float]:
+    """Get the latest quotes for a list of tickers.
+
+    Args:
+        tickers: List of ticker symbols e.g. ["BBCA.JK", "BBRI.JK"]
+
+    Returns:
+        Dict of latest prices, keyed by ticker symbol
+    """
+    if not tickers:
+        return {}
+
+    if DATA_PROVIDER == "goapi":
+        return {ticker: _goapi_latest_price(ticker) or 0.0 for ticker in tickers}
+
+    # For other providers, fall back to getting the most recent close price
+    # from OHLCV data
+    results = {}
+    ohlcvs = fetch_ohlcv(tickers, "1d", "1d", False)
+    for ticker, df in ohlcvs.items():
+        if df is not None and not df.empty:
+            results[ticker] = df["close"].iloc[-1]
+        else:
+            results[ticker] = 0.0
+    return results

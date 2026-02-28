@@ -47,13 +47,14 @@ Edit `config.py` to:
 
 ## Data Provider
 
-This app now reads market data from **Twelve Data** (default) or **GOAPI**.
+This app now reads market data from **Yahoo Finance** (default), **Twelve Data**, **GOAPI**, or **Alpha Vantage**.
 
 Set environment variables before running:
 
-- `DATA_PROVIDER` = `twelvedata` or `goapi`
+- `DATA_PROVIDER` = `yfinance`, `twelvedata`, `goapi`, or `alphavantage`
 - `TWELVEDATA_API_KEY` (required for Twelve Data)
 - `GOAPI_API_KEY` (required for GOAPI)
+- `ALPHAVANTAGE_API_KEY` (required for Alpha Vantage)
 - `GOAPI_BASE_URL` (default `https://api.goapi.id/v1`)
 - `GOAPI_OHLCV_ENDPOINT` (default `/stock/idx/{symbol}/historical`)
 - `GOAPI_QUOTE_ENDPOINT` (default `/stock/idx/prices`)
@@ -71,11 +72,28 @@ DATA_PROVIDER=goapi
 GOAPI_API_KEY=YOUR_KEY
 ```
 
+Alpha Vantage example:
+```bash
+DATA_PROVIDER=alphavantage
+ALPHAVANTAGE_API_KEY=YOUR_KEY
+```
+
+Enhanced yfinance example (default):
+```bash
+DATA_PROVIDER=yfinance
+YF_MAX_RETRIES=3
+YF_RETRY_BACKOFF_SEC=1.0
+```
+
 Optional tuning to reduce rate-limit errors:
-- `DATA_CACHE_TTL_SEC` (default `60`) – reuse cached OHLCV for a short time
+- `DATA_CACHE_TTL_SEC` (default `30`) – reuse cached OHLCV for a short time
 - `TWELVEDATA_MAX_RETRIES` (default `2`) – retry on 429
 - `TWELVEDATA_RETRY_BACKOFF_SEC` (default `2.0`) – backoff between retries
 - `GOAPI_SLEEP_BETWEEN_CALLS_SEC` (default `0.2`) – pause between GOAPI calls
+- `ALPHAVANTAGE_MAX_RETRIES` (default `2`) – retry on errors
+- `ALPHAVANTAGE_RETRY_BACKOFF_SEC` (default `2.0`) – backoff between retries
+- `YF_MAX_RETRIES` (default `3`) – retry on Yahoo Finance errors
+- `YF_RETRY_BACKOFF_SEC` (default `1.0`) – backoff between retries
 
 ## Deploy on Render (Streamlit)
 
