@@ -807,12 +807,12 @@ def update_last_candle_with_realtime(df: pd.DataFrame, price: float, volume: Opt
 
 
 # Additional compatibility aliases for analyzer.py
-def fetch_multiple_stocks(tickers: list[str], period: Optional[str] = None, interval: str = "1d") -> dict[str, pd.DataFrame]:
+def fetch_multiple_stocks(tickers: list[str], period: Optional[str] = None, interval: str = "1d", progress_callback=None, bypass_cache: bool = False) -> dict[str, pd.DataFrame]:
     """Fetch OHLCV data for multiple tickers. Alias for fetch_ohlcv."""
     return fetch_ohlcv(tickers, period, interval, False)
 
 
-def fetch_multiple_stocks_bulk(tickers: list[str], interval: str = "1d", period: Optional[str] = None, bypass_cache: bool = False, return_data: bool = True) -> dict[str, pd.DataFrame]:
+def fetch_multiple_stocks_bulk(tickers: list[str], interval: str = "1d", period: Optional[str] = None, progress_callback=None, bypass_cache: bool = False, return_data: bool = True) -> dict[str, pd.DataFrame]:
     """Fetch OHLCV data for multiple tickers in bulk mode."""
     return fetch_ohlcv(tickers, period, interval, False)
 
