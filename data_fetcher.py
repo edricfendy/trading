@@ -780,6 +780,43 @@ def fetch_ohlcv(
     return results
 
 
+# For compatibility with streamlit_app.py
+def fetch_stock_data(ticker: str, period: Optional[str] = None, interval: str = "1d") -> pd.DataFrame:
+    """Fetch OHLCV data for a single ticker."""
+    result = fetch_ohlcv([ticker], period, interval, False)
+    return result.get(ticker, pd.DataFrame())
+
+
+def fetch_realtime_prices(tickers: list[str]) -> tuple[dict[str, float], str]:
+    """Fetch realtime prices for tickers. Returns (prices_dict, source)."""
+    prices = get_latest_quotes(tickers)
+    source = DATA_PROVIDER
+    return prices, source
+
+
+def update_last_candle_with_realtime(df: pd.DataFrame, price: float, volume: Optional[float] = None) -> pd.DataFrame:
+    """Update the last candle with realtime price."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    if "close" in df.columns:
+        df.iloc[-1, df.columns.get_loc("close")] = price
+    if volume is not None and "volume" in df.columns:
+        df.iloc[-1, df.columns.get_loc("volume")] = volume
+    return df
+
+
+# Additional compatibility aliases for analyzer.py
+def fetch_multiple_stocks(tickers: list[str], period: Optional[str] = None, interval: str = "1d") -> dict[str, pd.DataFrame]:
+    """Fetch OHLCV data for multiple tickers. Alias for fetch_ohlcv."""
+    return fetch_ohlcv(tickers, period, interval, False)
+
+
+def fetch_multiple_stocks_bulk(tickers: list[str], interval: str = "1d", period: Optional[str] = None, bypass_cache: bool = False, return_data: bool = True) -> dict[str, pd.DataFrame]:
+    """Fetch OHLCV data for multiple tickers in bulk mode."""
+    return fetch_ohlcv(tickers, period, interval, False)
+
+
 def get_latest_quotes(tickers: list[str]) -> dict[str, float]:
     """Get the latest quotes for a list of tickers.
 
