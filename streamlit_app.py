@@ -298,11 +298,14 @@ with tab1:
             # Valuation panel
             st.markdown("### 💰 Valuation Analysis")
             v = st.columns(5)
-            v[0].metric("Current Price",  _rp(sig.price))
-            v[1].metric("PER",            _fmt(sig.per, ".1f", "x") if sig.per else "-")
-            v[2].metric("EPS (TTM)",      _fmt(sig.eps, ",.0f", " Rp") if sig.eps else "-")
-            v[3].metric("Valuation Price", _rp(sig.valuation_price))
-            v[4].metric("PBV",            _fmt(sig.pbv, ".2f", "x") if sig.pbv else "-")
+            bm_per_val = getattr(sig, "benchmark_per", None)
+            v[0].metric("Current Price",    _rp(sig.price))
+            v[1].metric("Trailing PER",     _fmt(sig.per, ".1f", "x") if sig.per else "-",
+                        help="Stock's own trailing P/E (price ÷ EPS). NOT used in fair value.")
+            v[2].metric("EPS (TTM)",        _fmt(sig.eps, ",.0f", " Rp") if sig.eps else "-")
+            v[3].metric("Fair Value (BM PER×EPS)", _rp(sig.valuation_price),
+                        help=f"Benchmark PER {bm_per_val:.1f}x × EPS(TTM) = Fair Value" if bm_per_val else "N/A")
+            v[4].metric("PBV",              _fmt(sig.pbv, ".2f", "x") if sig.pbv else "-")
 
             if sig.price_vs_valuation:
                 st.markdown(_color_valuation(sig.price_vs_valuation), unsafe_allow_html=True)
@@ -310,7 +313,23 @@ with tab1:
                     diff = sig.price - sig.valuation_price
                     diff_pct = (diff / sig.valuation_price) * 100
                     direction = "above" if diff > 0 else "below"
-                    st.caption(f"Current price is Rp {abs(diff):,.0f} ({abs(diff_pct):.1f}%) {direction} the PER-implied fair value")
+                    # Show the benchmark PER used and the formula
+                    bm = getattr(sig, "benchmark_per", None)
+                    method = getattr(sig, "valuation_method", "")
+                    formula_note = f" | Formula: {method}" if method else ""
+                    st.caption(
+                        f"Current price is Rp {abs(diff):,.0f} ({abs(diff_pct):.1f}%) {direction} "
+                        f"the fair value estimate{formula_note}"
+                    )
+                    if bm:
+                        st.info(
+                            f"📐 **Valuation Method**: Benchmark PER **{bm:.1f}×** (IDX {sig.sector or 'market'} "
+                            f"sector average) × EPS(TTM) **Rp {sig.eps:,.0f}** = "
+                            f"Fair Value **{_rp(sig.valuation_price)}**  \n"
+                            f"*Note: Benchmark PER is the sector fair multiple, NOT the stock's own trailing PER "
+                            f"({_fmt(sig.per, '.1f', 'x') if sig.per else 'N/A'}). "
+                            f"Using the stock's own PER × EPS always equals the current price.*"
+                        )
             else:
                 st.caption("Valuation price unavailable (missing PER or EPS data)")
 
@@ -627,7 +646,12 @@ with st.expander("📖 Indicator & Signal Guide"):
         - **Current Ratio < 1** → liquidity risk
         - **Positive FCF** → healthy cash
         - **Free Float < 15%** → ⚠️ manipulation risk
-        - **Valuation Price** = PER × EPS (TTM)
+
+        **Valuation Price = Benchmark PER × EPS(TTM)**
+        - **Benchmark PER** = IDX sector-average fair multiple (e.g. 12× for banks, 22× for tech)
+        - **NOT** the stock's own trailing PER (that gives a tautology: price = price)
+        - **CHEAP** = current price < fair value estimate
+        - **EXPENSIVE** = current price > fair value estimate
 
         **Confidence Score**
         - Technical signals (0–100%)
