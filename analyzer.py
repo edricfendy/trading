@@ -1,25 +1,39 @@
 """
 Trading AI Analyzer - Enhanced with comprehensive TA + Fundamentals
+
+Key fix vs original:
+- TimingSignal now carries benchmark_per + valuation_method from FundamentalSnapshot
+- valuation_price = BENCHMARK_PER(sector) × EPS(TTM)  — NOT trailingPE × EPS (tautology)
+- analyze_ta_only() also carries the new fields (as None) so it stays compatible
 """
 from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 from typing import Optional
 from dataclasses import dataclass, field
+
 from config import OVERSOLD_THRESHOLD, OVERBOUGHT_THRESHOLD, SMI_BULLISH_THRESHOLD
-from data_fetcher import fetch_multiple_stocks, fetch_multiple_stocks_bulk, fetch_stock_data, fetch_realtime_prices, update_last_candle_with_realtime
+from data_fetcher import (
+    fetch_multiple_stocks,
+    fetch_multiple_stocks_bulk,
+    fetch_stock_data,
+    fetch_realtime_prices,
+    update_last_candle_with_realtime,
+)
 from indicators import add_indicators
 from fundamentals import FundamentalSnapshot, fetch_fundamentals
 
 
+# ─── TimingSignal ─────────────────────────────────────────────────────────────
 @dataclass
 class TimingSignal:
     ticker: str
-    action: str                      # BUY, SELL, HOLD
+    action: str                      # BUY / SELL / HOLD
     confidence: float                # 0-1
     horizon: str                     # long-term / short-term / speculative / neutral
     reason: str
-    # Technical
+    # ── Technical ──────────────────────────────────────────────────────────────
     stoch_rsi_k: Optional[float]
     stoch_rsi_d: Optional[float]
     rsi: Optional[float]
@@ -37,7 +51,7 @@ class TimingSignal:
     atr: Optional[float]
     vwap: Optional[float]
     bb_position: Optional[str]       # ABOVE / BELOW / INSIDE
-    # Fundamentals
+    # ── Fundamentals ───────────────────────────────────────────────────────────
     pbv: Optional[float]
     per: Optional[float]
     per_forward: Optional[float]
@@ -59,14 +73,16 @@ class TimingSignal:
     valuation_label: str
     sector: Optional[str]
     industry: Optional[str]
-    # Valuation pricing
+    # ── Valuation pricing (NEW — correct formula) ───────────────────────────────
     book_value_per_share: Optional[float]
-    valuation_price: Optional[float]       # PER × EPS (TTM)
+    valuation_price: Optional[float]       # BENCHMARK_PER × EPS(TTM)
+    benchmark_per: Optional[float]         # sector fair P/E used above
+    valuation_method: str                  # e.g. "Benchmark PER 12.0x × EPS 318"
     price_vs_valuation: Optional[str]      # CHEAP / EXPENSIVE / FAIR
-    # Identity / Ownership
+    # ── Identity ────────────────────────────────────────────────────────────────
     company_name: Optional[str]
     major_holders: Optional[str]
-    # Levels
+    # ── Trade levels ────────────────────────────────────────────────────────────
     take_profit: Optional[float]
     stop_loss: Optional[float]
     price: float
@@ -86,13 +102,10 @@ class ReboundCandidate:
     timestamp: str
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 def _valuation_label(f: FundamentalSnapshot) -> str:
-    """Classify valuation based on PBV + PER + ROE."""
     if f.pbv is None or f.per is None:
         return "unknown"
-    # Adjust for ROE quality
     roe_ok = f.roe is not None and f.roe > 0.10
     if f.pbv < 1.5 and f.per < 15:
         return "undervalued"
@@ -104,7 +117,6 @@ def _valuation_label(f: FundamentalSnapshot) -> str:
 
 
 def _free_float_signal(f: FundamentalSnapshot) -> tuple[str, float]:
-    """Returns (note, confidence_adj)"""
     if f.free_float_ratio is None:
         return "free float unknown – treat with caution", 0.0
     pct = f.free_float_ratio * 100
@@ -131,7 +143,6 @@ def _solvency_notes(f: FundamentalSnapshot) -> list[str]:
 
 
 def _fundamental_conf_adj(f: FundamentalSnapshot, action: str) -> tuple[float, list[str]]:
-    """Return confidence adjustment and reasons from fundamentals."""
     adj = 0.0
     reasons = []
     label = _valuation_label(f)
@@ -147,7 +158,7 @@ def _fundamental_conf_adj(f: FundamentalSnapshot, action: str) -> tuple[float, l
             adj -= 0.10
             reasons.append(f"Rich valuation PBV={f.pbv:.2f}x PER={f.per:.1f}x – momentum/short-term only")
     elif action == "SELL":
-        if label in ("expensive",):
+        if label == "expensive":
             adj += 0.10
             reasons.append("Overvaluation supports reducing exposure")
 
@@ -163,7 +174,6 @@ def _fundamental_conf_adj(f: FundamentalSnapshot, action: str) -> tuple[float, l
     elif f.free_cashflow is not None and f.free_cashflow < 0:
         adj -= 0.05
         reasons.append("Negative free cash flow – monitor burn rate")
-
     if f.eps_growth is not None and f.eps_growth > 0.1:
         adj += 0.05
         reasons.append(f"EPS growth {f.eps_growth*100:.1f}% YoY")
@@ -176,7 +186,7 @@ def _determine_horizon(action: str, label: str, macd_trend: Optional[str], roc: 
         return "neutral"
     if label == "undervalued":
         return "long-term"
-    if label in ("fair-quality",):
+    if label == "fair-quality":
         return "balanced"
     if label == "expensive":
         return "short-term"
@@ -185,64 +195,77 @@ def _determine_horizon(action: str, label: str, macd_trend: Optional[str], roc: 
     return "neutral"
 
 
-# ─── Main analyzer ───────────────────────────────────────────────────────────
+def _price_vs_valuation(price: float, valuation_price: Optional[float]) -> Optional[str]:
+    """Compare current price against benchmark-based fair value."""
+    if valuation_price is None or valuation_price <= 0:
+        return None
+    ratio = price / valuation_price
+    if ratio < 0.95:       # more than 5% below fair value → CHEAP
+        return "CHEAP"
+    if ratio > 1.05:       # more than 5% above fair value → EXPENSIVE
+        return "EXPENSIVE"
+    return "FAIR"
 
-def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
+
+# ─── Empty signal factory ──────────────────────────────────────────────────────
+def _empty_signal(ticker: str, action: str = "HOLD") -> TimingSignal:
     now = pd.Timestamp.now().isoformat()
+    return TimingSignal(
+        ticker=ticker, action=action, confidence=0.0,
+        horizon="neutral", reason="Insufficient data",
+        stoch_rsi_k=None, stoch_rsi_d=None, rsi=None, smi=None,
+        macd_trend=None, macd_divergence=None, roc_12=None,
+        bandar_score=None, obv_momentum=None,
+        support_20=None, resistance_20=None,
+        pivot=None, pivot_s1=None, pivot_r1=None,
+        atr=None, vwap=None, bb_position=None,
+        pbv=None, per=None, per_forward=None,
+        roe=None, roa=None, roic=None, eps=None,
+        eps_growth=None, free_cashflow=None, operating_cashflow=None,
+        revenue=None, debt_to_equity=None, current_ratio=None,
+        gross_margins=None, profit_margins=None, dividend_yield=None,
+        free_float_ratio=None, market_cap=None, valuation_label="unknown",
+        sector=None, industry=None,
+        book_value_per_share=None,
+        valuation_price=None, benchmark_per=None, valuation_method="",
+        price_vs_valuation=None,
+        company_name=None, major_holders=None,
+        take_profit=None, stop_loss=None, price=0.0, timestamp=now,
+    )
 
-    def _empty(action="HOLD"):
-        f = FundamentalSnapshot()
-        return TimingSignal(
-            ticker=ticker, action=action, confidence=0.0,
-            horizon="neutral", reason="Insufficient data",
-            stoch_rsi_k=None, stoch_rsi_d=None, rsi=None, smi=None,
-            macd_trend=None, macd_divergence=None, roc_12=None,
-            bandar_score=None, obv_momentum=None,
-            support_20=None, resistance_20=None,
-            pivot=None, pivot_s1=None, pivot_r1=None,
-            atr=None, vwap=None, bb_position=None,
-            pbv=None, per=None, per_forward=None,
-            roe=None, roa=None, roic=None, eps=None,
-            eps_growth=None, free_cashflow=None, operating_cashflow=None,
-            revenue=None, debt_to_equity=None, current_ratio=None,
-            gross_margins=None, profit_margins=None, dividend_yield=None,
-            free_float_ratio=None, market_cap=None, valuation_label="unknown",
-            sector=None, industry=None,
-            book_value_per_share=None, valuation_price=None,
-            price_vs_valuation=None, company_name=None, major_holders=None,
-            take_profit=None, stop_loss=None, price=0.0, timestamp=now,
-        )
 
-    if df is None or df.empty or len(df) < 30:
-        return _empty()
-
-    df = add_indicators(df)
+# ─── TA scoring (shared by both full + TA-only paths) ────────────────────────
+def _score_ta(df: pd.DataFrame) -> dict:
+    """
+    Run all TA indicators on df and return a dict with scores + values.
+    df must already have add_indicators() applied.
+    """
     latest = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else latest
+    prev   = df.iloc[-2] if len(df) >= 2 else latest
 
-    price = float(latest["close"])
-    stoch_k = latest.get("stoch_rsi_k")
-    stoch_d = latest.get("stoch_rsi_d")
-    rsi_val = latest.get("rsi")
-    smi_val = latest.get("smi")
-    macd_line = latest.get("macd_line")
-    macd_signal_val = latest.get("macd_signal")
-    macd_div_val = latest.get("macd_divergence")
-    roc_12 = latest.get("roc_12")
-    bandar = latest.get("bandar_score")
-    obv_mom = latest.get("obv_momentum")
-    support_20 = latest.get("support_20")
-    resistance_20 = latest.get("resistance_20")
-    pivot = latest.get("pivot")
-    s1 = latest.get("pivot_s1")
-    r1 = latest.get("pivot_r1")
-    atr_val = latest.get("atr")
-    vwap_val = latest.get("vwap")
-    bb_upper = latest.get("bb_upper")
-    bb_lower = latest.get("bb_lower")
+    price       = float(latest["close"])
+    stoch_k     = latest.get("stoch_rsi_k")
+    stoch_d     = latest.get("stoch_rsi_d")
+    rsi_val     = latest.get("rsi")
+    smi_val     = latest.get("smi")
+    macd_line   = latest.get("macd_line")
+    macd_sig    = latest.get("macd_signal")
+    macd_div    = latest.get("macd_divergence")
+    roc_12      = latest.get("roc_12")
+    bandar      = latest.get("bandar_score")
+    obv_mom     = latest.get("obv_momentum")
+    support_20  = latest.get("support_20")
+    resist_20   = latest.get("resistance_20")
+    pivot       = latest.get("pivot")
+    s1          = latest.get("pivot_s1")
+    r1          = latest.get("pivot_r1")
+    atr_val     = latest.get("atr")
+    vwap_val    = latest.get("vwap")
+    bb_upper    = latest.get("bb_upper")
+    bb_lower    = latest.get("bb_lower")
 
     reasons: list[str] = []
-    buy_score = 0.0
+    buy_score  = 0.0
     sell_score = 0.0
 
     # ── Stochastic RSI ──────────────────────────────────────────────────────
@@ -255,7 +278,7 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
             sell_score += 0.4
 
         if pd.notna(stoch_d):
-            pk = prev.get("stoch_rsi_k", np.nan)
+            pk  = prev.get("stoch_rsi_k", np.nan)
             pd_ = prev.get("stoch_rsi_d", np.nan)
             if pd.notna(pk) and pd.notna(pd_):
                 if stoch_k > stoch_d and pk <= pd_:
@@ -277,25 +300,25 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
     # ── MACD ─────────────────────────────────────────────────────────────────
     macd_trend: Optional[str] = None
     macd_div_str: Optional[str] = None
-    if pd.notna(macd_line) and pd.notna(macd_signal_val):
+    if pd.notna(macd_line) and pd.notna(macd_sig):
         pm = prev.get("macd_line", np.nan)
         ps = prev.get("macd_signal", np.nan)
         if pd.notna(pm) and pd.notna(ps):
-            if macd_line > macd_signal_val and pm <= ps:
+            if macd_line > macd_sig and pm <= ps:
                 macd_trend = "golden_cross"
                 reasons.append("MACD golden cross – bullish momentum")
                 buy_score += 0.3
-            elif macd_line < macd_signal_val and pm >= ps:
+            elif macd_line < macd_sig and pm >= ps:
                 macd_trend = "dead_cross"
                 reasons.append("MACD dead cross – bearish momentum")
                 sell_score += 0.3
 
-    if pd.notna(macd_div_val):
-        if macd_div_val == 1:
+    if pd.notna(macd_div):
+        if macd_div == 1:
             macd_div_str = "bullish"
             reasons.append("MACD bullish divergence – potential reversal upward")
             buy_score += 0.2
-        elif macd_div_val == -1:
+        elif macd_div == -1:
             macd_div_str = "bearish"
             reasons.append("MACD bearish divergence – potential reversal downward")
             sell_score += 0.2
@@ -321,7 +344,7 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
             reasons.append(f"Moderate big-player buying (score={bandar:.1f})")
             buy_score += 0.10
 
-    # ── OBV / Foreign Flow ───────────────────────────────────────────────────
+    # ── OBV ──────────────────────────────────────────────────────────────────
     obv_label: Optional[str] = None
     if pd.notna(obv_mom):
         if obv_mom > 0:
@@ -333,7 +356,7 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
             reasons.append("OBV momentum negative – foreign/institutional outflow signal")
             sell_score += 0.15
 
-    # ── ROC Momentum ─────────────────────────────────────────────────────────
+    # ── ROC ──────────────────────────────────────────────────────────────────
     if pd.notna(roc_12):
         if roc_12 > 5:
             reasons.append(f"Positive momentum ROC12={roc_12:.1f}%")
@@ -342,7 +365,7 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
             reasons.append(f"Negative momentum ROC12={roc_12:.1f}%")
             sell_score += 0.10
 
-    # ── Price vs VWAP ────────────────────────────────────────────────────────
+    # ── Bollinger ─────────────────────────────────────────────────────────────
     bb_pos: Optional[str] = None
     if pd.notna(bb_upper) and pd.notna(bb_lower):
         if price < float(bb_lower):
@@ -356,109 +379,190 @@ def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
         else:
             bb_pos = "INSIDE"
 
-    # ── Action decision ──────────────────────────────────────────────────────
-    action = "HOLD"
-    tech_conf = 0.0
+    # ── Action decision ───────────────────────────────────────────────────────
     if buy_score > sell_score and buy_score >= 0.4:
-        action = "BUY"
+        action    = "BUY"
         tech_conf = min(1.0, buy_score)
     elif sell_score > buy_score and sell_score >= 0.4:
-        action = "SELL"
+        action    = "SELL"
         tech_conf = min(1.0, sell_score)
     else:
-        action = "HOLD"
+        action    = "HOLD"
         tech_conf = 0.5
 
-    # ── Fundamentals ─────────────────────────────────────────────────────────
-    f = fetch_fundamentals(ticker)
-    label = _valuation_label(f)
-    ff_note, ff_adj = _free_float_signal(f)
-    fund_adj, fund_reasons = _fundamental_conf_adj(f, action)
-    solv_notes = _solvency_notes(f)
-
-    reasons.append(ff_note)
-    reasons.extend(fund_reasons)
-    reasons.extend(solv_notes)
-
-    confidence = max(0.0, min(1.0, tech_conf + fund_adj + ff_adj))
-    horizon = _determine_horizon(action, label, macd_trend, roc_12 if pd.notna(roc_12) else None)
-
-    # ── Take Profit / Stop Loss (ATR-based + support/resistance) ─────────────
+    # ── TP / SL (ATR-based) ───────────────────────────────────────────────────
     tp: Optional[float] = None
     sl: Optional[float] = None
     if action == "BUY" and pd.notna(atr_val):
         atr_f = float(atr_val)
-        # TP: near resistance or +2.5 ATR
-        if pd.notna(resistance_20):
-            tp = float(min(float(resistance_20) * 0.98, price + 2.5 * atr_f))
-        else:
-            tp = price + 2.5 * atr_f
-        # SL: below support or -1.5 ATR
-        if pd.notna(support_20):
-            sl = float(max(float(support_20) * 0.97, price - 1.5 * atr_f))
-        else:
-            sl = price - 1.5 * atr_f
+        tp = float(min(float(resist_20) * 0.98, price + 2.5 * atr_f)) if pd.notna(resist_20) else price + 2.5 * atr_f
+        sl = float(max(float(support_20) * 0.97, price - 1.5 * atr_f)) if pd.notna(support_20) else price - 1.5 * atr_f
         reasons.append(f"TP ~Rp {tp:,.0f} | SL ~Rp {sl:,.0f} (ATR={atr_f:,.0f})")
 
-    reason_str = " | ".join(reasons) if reasons else "No strong signal"
-
-    return TimingSignal(
-        ticker=ticker, action=action, confidence=confidence,
-        horizon=horizon, reason=reason_str,
-        stoch_rsi_k=float(stoch_k) if pd.notna(stoch_k) else None,
-        stoch_rsi_d=float(stoch_d) if pd.notna(stoch_d) else None,
-        rsi=float(rsi_val) if pd.notna(rsi_val) else None,
-        smi=float(smi_val) if pd.notna(smi_val) else None,
-        macd_trend=macd_trend,
-        macd_divergence=macd_div_str,
-        roc_12=float(roc_12) if pd.notna(roc_12) else None,
-        bandar_score=float(bandar) if pd.notna(bandar) else None,
-        obv_momentum=obv_label,
-        support_20=float(support_20) if pd.notna(support_20) else None,
-        resistance_20=float(resistance_20) if pd.notna(resistance_20) else None,
-        pivot=float(pivot) if pd.notna(pivot) else None,
-        pivot_s1=float(s1) if pd.notna(s1) else None,
-        pivot_r1=float(r1) if pd.notna(r1) else None,
-        atr=float(atr_val) if pd.notna(atr_val) else None,
-        vwap=float(vwap_val) if pd.notna(vwap_val) else None,
-        bb_position=bb_pos,
-        pbv=f.pbv, per=f.per, per_forward=f.per_forward,
-        roe=f.roe, roa=f.roa, roic=f.roic,
-        eps=f.eps, eps_growth=f.eps_growth,
-        free_cashflow=f.free_cashflow, operating_cashflow=f.operating_cashflow,
-        revenue=f.revenue, debt_to_equity=f.debt_to_equity,
-        current_ratio=f.current_ratio, gross_margins=f.gross_margins,
-        profit_margins=f.profit_margins, dividend_yield=f.dividend_yield,
-        free_float_ratio=f.free_float_ratio, market_cap=f.market_cap,
-        valuation_label=label,
-        sector=f.sector, industry=f.industry,
-        book_value_per_share=f.book_value_per_share,
-        valuation_price=f.valuation_price,
-        price_vs_valuation=(
-            "CHEAP" if f.valuation_price and price < f.valuation_price
-            else "EXPENSIVE" if f.valuation_price and price > f.valuation_price
-            else None
-        ),
-        company_name=f.company_name,
-        major_holders=f.major_holders,
-        take_profit=tp, stop_loss=sl,
-        price=price,
-        timestamp=latest.name.isoformat() if hasattr(latest.name, "isoformat") else str(latest.name),
+    return dict(
+        price=price, action=action, tech_conf=tech_conf, reasons=reasons,
+        stoch_k=stoch_k, stoch_d=stoch_d, rsi_val=rsi_val, smi_val=smi_val,
+        macd_trend=macd_trend, macd_div_str=macd_div_str, roc_12=roc_12,
+        bandar=bandar, obv_label=obv_label,
+        support_20=support_20, resist_20=resist_20,
+        pivot=pivot, s1=s1, r1=r1,
+        atr_val=atr_val, vwap_val=vwap_val, bb_pos=bb_pos,
+        tp=tp, sl=sl,
     )
 
 
+# ─── Full analysis (TA + Fundamentals) ───────────────────────────────────────
+def analyze_buy_sell_timing(df: pd.DataFrame, ticker: str) -> TimingSignal:
+    now = pd.Timestamp.now().isoformat()
+
+    if df is None or df.empty or len(df) < 30:
+        return _empty_signal(ticker)
+
+    df  = add_indicators(df)
+    ta  = _score_ta(df)
+    ts  = df.iloc[-1].name
+
+    # ── Fundamentals ─────────────────────────────────────────────────────────
+    f = fetch_fundamentals(ticker)          # always returns a FundamentalSnapshot
+    label    = _valuation_label(f)
+    ff_note, ff_adj   = _free_float_signal(f)
+    fund_adj, fund_rsn = _fundamental_conf_adj(f, ta["action"])
+    solv_notes        = _solvency_notes(f)
+
+    reasons = ta["reasons"] + [ff_note] + fund_rsn + solv_notes
+    confidence = max(0.0, min(1.0, ta["tech_conf"] + fund_adj + ff_adj))
+    horizon    = _determine_horizon(ta["action"], label,
+                                    ta["macd_trend"],
+                                    float(ta["roc_12"]) if pd.notna(ta["roc_12"]) else None)
+
+    return TimingSignal(
+        ticker=ticker,
+        action=ta["action"],
+        confidence=confidence,
+        horizon=horizon,
+        reason=" | ".join(reasons) if reasons else "No strong signal",
+        # ── TA fields ──────────────────────────────────────────────────────
+        stoch_rsi_k =float(ta["stoch_k"])   if pd.notna(ta["stoch_k"])  else None,
+        stoch_rsi_d =float(ta["stoch_d"])   if pd.notna(ta["stoch_d"])  else None,
+        rsi         =float(ta["rsi_val"])   if pd.notna(ta["rsi_val"])  else None,
+        smi         =float(ta["smi_val"])   if pd.notna(ta["smi_val"])  else None,
+        macd_trend  =ta["macd_trend"],
+        macd_divergence=ta["macd_div_str"],
+        roc_12      =float(ta["roc_12"])    if pd.notna(ta["roc_12"])   else None,
+        bandar_score=float(ta["bandar"])    if pd.notna(ta["bandar"])   else None,
+        obv_momentum=ta["obv_label"],
+        support_20  =float(ta["support_20"])if pd.notna(ta["support_20"])else None,
+        resistance_20=float(ta["resist_20"])if pd.notna(ta["resist_20"])else None,
+        pivot       =float(ta["pivot"])     if pd.notna(ta["pivot"])    else None,
+        pivot_s1    =float(ta["s1"])        if pd.notna(ta["s1"])       else None,
+        pivot_r1    =float(ta["r1"])        if pd.notna(ta["r1"])       else None,
+        atr         =float(ta["atr_val"])   if pd.notna(ta["atr_val"])  else None,
+        vwap        =float(ta["vwap_val"])  if pd.notna(ta["vwap_val"]) else None,
+        bb_position =ta["bb_pos"],
+        take_profit =ta["tp"],
+        stop_loss   =ta["sl"],
+        price       =ta["price"],
+        timestamp   =ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+        # ── Fundamental fields ─────────────────────────────────────────────
+        pbv             =f.pbv,
+        per             =f.per,
+        per_forward     =f.per_forward,
+        roe             =f.roe,
+        roa             =f.roa,
+        roic            =f.roic,
+        eps             =f.eps,
+        eps_growth      =f.eps_growth,
+        free_cashflow   =f.free_cashflow,
+        operating_cashflow=f.operating_cashflow,
+        revenue         =f.revenue,
+        debt_to_equity  =f.debt_to_equity,
+        current_ratio   =f.current_ratio,
+        gross_margins   =f.gross_margins,
+        profit_margins  =f.profit_margins,
+        dividend_yield  =f.dividend_yield,
+        free_float_ratio=f.free_float_ratio,
+        market_cap      =f.market_cap,
+        valuation_label =label,
+        sector          =f.sector,
+        industry        =f.industry,
+        book_value_per_share=f.book_value_per_share,
+        # ── NEW correct valuation fields ───────────────────────────────────
+        valuation_price    =f.valuation_price,
+        benchmark_per      =f.benchmark_per,
+        valuation_method   =f.valuation_method,
+        price_vs_valuation =_price_vs_valuation(ta["price"], f.valuation_price),
+        # ── Identity ───────────────────────────────────────────────────────
+        company_name  =f.company_name,
+        major_holders =f.major_holders,
+    )
+
+
+# ─── TA-only (fast, no fundamentals — used for bulk sector scan) ──────────────
+def analyze_ta_only(df: pd.DataFrame, ticker: str) -> TimingSignal:
+    """Lightweight TA-only — skips fetch_fundamentals() for bulk scanning."""
+    if df is None or df.empty or len(df) < 30:
+        return _empty_signal(ticker)
+
+    df = add_indicators(df)
+    ta = _score_ta(df)
+    ts = df.iloc[-1].name
+
+    return TimingSignal(
+        ticker=ticker,
+        action=ta["action"],
+        confidence=min(1.0, ta["tech_conf"]),
+        horizon="neutral",
+        reason=" | ".join(ta["reasons"]) if ta["reasons"] else "No strong signal",
+        stoch_rsi_k =float(ta["stoch_k"])    if pd.notna(ta["stoch_k"])   else None,
+        stoch_rsi_d =float(ta["stoch_d"])    if pd.notna(ta["stoch_d"])   else None,
+        rsi         =float(ta["rsi_val"])    if pd.notna(ta["rsi_val"])   else None,
+        smi         =float(ta["smi_val"])    if pd.notna(ta["smi_val"])   else None,
+        macd_trend  =ta["macd_trend"],
+        macd_divergence=ta["macd_div_str"],
+        roc_12      =float(ta["roc_12"])     if pd.notna(ta["roc_12"])    else None,
+        bandar_score=float(ta["bandar"])     if pd.notna(ta["bandar"])    else None,
+        obv_momentum=ta["obv_label"],
+        support_20  =float(ta["support_20"]) if pd.notna(ta["support_20"])else None,
+        resistance_20=float(ta["resist_20"]) if pd.notna(ta["resist_20"]) else None,
+        pivot       =float(ta["pivot"])      if pd.notna(ta["pivot"])     else None,
+        pivot_s1    =float(ta["s1"])         if pd.notna(ta["s1"])        else None,
+        pivot_r1    =float(ta["r1"])         if pd.notna(ta["r1"])        else None,
+        atr         =float(ta["atr_val"])    if pd.notna(ta["atr_val"])   else None,
+        vwap        =float(ta["vwap_val"])   if pd.notna(ta["vwap_val"])  else None,
+        bb_position =ta["bb_pos"],
+        take_profit =ta["tp"],
+        stop_loss   =ta["sl"],
+        price       =ta["price"],
+        timestamp   =ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+        # Fundamentals all None for TA-only path
+        pbv=None, per=None, per_forward=None,
+        roe=None, roa=None, roic=None,
+        eps=None, eps_growth=None,
+        free_cashflow=None, operating_cashflow=None,
+        revenue=None, debt_to_equity=None, current_ratio=None,
+        gross_margins=None, profit_margins=None, dividend_yield=None,
+        free_float_ratio=None, market_cap=None,
+        valuation_label="unknown",
+        sector=None, industry=None,
+        book_value_per_share=None,
+        valuation_price=None, benchmark_per=None, valuation_method="",
+        price_vs_valuation=None,
+        company_name=None, major_holders=None,
+    )
+
+
+# ─── Batch helpers ────────────────────────────────────────────────────────────
 def screen_rebound_candidates(
     tickers: Optional[list] = None,
     min_score: float = 50,
     rt_prices: Optional[dict] = None,
     data: Optional[dict[str, pd.DataFrame]] = None,
-) -> list:
+) -> list[ReboundCandidate]:
     if data is None:
         data = fetch_multiple_stocks(tickers=tickers, period="3mo")
     if not data:
         return []
 
-    # Fetch real-time prices if not supplied
     if rt_prices is None:
         try:
             rt_prices, _ = fetch_realtime_prices(list(data.keys()))
@@ -466,27 +570,23 @@ def screen_rebound_candidates(
             rt_prices = {}
 
     candidates = []
-
     for ticker, df in data.items():
         if df.empty or len(df) < 30:
             continue
-
-        # Inject real-time price into the last candle BEFORE computing indicators
         if ticker in rt_prices:
             df = update_last_candle_with_realtime(df, rt_prices[ticker])
-
         df = add_indicators(df)
-        latest = df.iloc[-1]
-        price = float(latest["close"])
+        latest  = df.iloc[-1]
+        price   = float(latest["close"])
         stoch_k = latest.get("stoch_rsi_k")
-        smi = latest.get("smi")
-        bandar = latest.get("bandar_score")
+        smi     = latest.get("smi")
+        bandar  = latest.get("bandar_score")
 
         if pd.isna(stoch_k):
             continue
 
         reasons = []
-        score = 0.0
+        score   = 0.0
 
         if stoch_k < OVERSOLD_THRESHOLD:
             score += 40 * (1 - stoch_k / OVERSOLD_THRESHOLD)
@@ -500,7 +600,6 @@ def screen_rebound_candidates(
                 reasons.append("Smart money accumulating")
             elif smi < -0.5:
                 smi_trend = "DISTRIBUTING"
-                reasons.append("Smart money distributing")
             else:
                 score += 10
 
@@ -512,7 +611,6 @@ def screen_rebound_candidates(
                 reasons.append(f"Big player buying (bandar={bandar:.1f})")
             elif bandar < -2:
                 bandar_trend = "SELLING"
-                reasons.append(f"Big player selling (bandar={bandar:.1f})")
 
         recent_change = 0.0
         if len(df) >= 5:
@@ -540,253 +638,21 @@ def screen_rebound_candidates(
     return sorted(candidates, key=lambda x: x.rebound_score, reverse=True)
 
 
-def get_all_signals(
-    tickers: Optional[list] = None,
-) -> tuple[list, dict, str]:
-    """
-    Fetch data, inject real-time prices into OHLCV, then compute indicators.
-
-    Returns:
-        (signals_list, rt_prices_dict, rt_source_label)
-    """
+def get_all_signals(tickers: Optional[list] = None) -> tuple[list, dict, str]:
     data = fetch_multiple_stocks(tickers=tickers, period="3mo")
-
-    # Fetch real-time prices for all tickers in one batch
-    rt_prices: dict[str, float] = {}
-    rt_source_label = ""
+    rt_prices, rt_source_label = {}, ""
     try:
         rt_prices, rt_source_label = fetch_realtime_prices(list(data.keys()))
     except Exception:
-        rt_prices = {}
-        rt_source_label = ""
+        pass
 
     signals = []
     for ticker, df in data.items():
-        # Inject real-time price into the last candle BEFORE computing indicators
         if ticker in rt_prices:
             df = update_last_candle_with_realtime(df, rt_prices[ticker])
-        sig = analyze_buy_sell_timing(df, ticker)
-        signals.append(sig)
+        signals.append(analyze_buy_sell_timing(df, ticker))
 
-    sorted_signals = sorted(signals, key=lambda x: (x.action != "HOLD", -x.confidence))
-    return sorted_signals, rt_prices, rt_source_label
-
-
-def analyze_ta_only(df: pd.DataFrame, ticker: str) -> TimingSignal:
-    """
-    Lightweight TA-only analysis — skips the expensive fetch_fundamentals() call.
-    Used for bulk scanning of 800+ stocks in sector overview.
-    """
-    now = pd.Timestamp.now().isoformat()
-
-    def _empty(action="HOLD"):
-        return TimingSignal(
-            ticker=ticker, action=action, confidence=0.0,
-            horizon="neutral", reason="Insufficient data",
-            stoch_rsi_k=None, stoch_rsi_d=None, rsi=None, smi=None,
-            macd_trend=None, macd_divergence=None, roc_12=None,
-            bandar_score=None, obv_momentum=None,
-            support_20=None, resistance_20=None,
-            pivot=None, pivot_s1=None, pivot_r1=None,
-            atr=None, vwap=None, bb_position=None,
-            pbv=None, per=None, per_forward=None,
-            roe=None, roa=None, roic=None, eps=None,
-            eps_growth=None, free_cashflow=None, operating_cashflow=None,
-            revenue=None, debt_to_equity=None, current_ratio=None,
-            gross_margins=None, profit_margins=None, dividend_yield=None,
-            free_float_ratio=None, market_cap=None, valuation_label="unknown",
-            sector=None, industry=None,
-            book_value_per_share=None, valuation_price=None,
-            price_vs_valuation=None, company_name=None, major_holders=None,
-            take_profit=None, stop_loss=None, price=0.0, timestamp=now,
-        )
-
-    if df is None or df.empty or len(df) < 30:
-        return _empty()
-
-    df = add_indicators(df)
-    latest = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else latest
-
-    price = float(latest["close"])
-    stoch_k = latest.get("stoch_rsi_k")
-    stoch_d = latest.get("stoch_rsi_d")
-    rsi_val = latest.get("rsi")
-    smi_val = latest.get("smi")
-    macd_line = latest.get("macd_line")
-    macd_signal_val = latest.get("macd_signal")
-    macd_div_val = latest.get("macd_divergence")
-    roc_12 = latest.get("roc_12")
-    bandar = latest.get("bandar_score")
-    obv_mom = latest.get("obv_momentum")
-    support_20 = latest.get("support_20")
-    resistance_20 = latest.get("resistance_20")
-    pivot = latest.get("pivot")
-    s1 = latest.get("pivot_s1")
-    r1 = latest.get("pivot_r1")
-    atr_val = latest.get("atr")
-    vwap_val = latest.get("vwap")
-    bb_upper = latest.get("bb_upper")
-    bb_lower = latest.get("bb_lower")
-
-    reasons: list[str] = []
-    buy_score = 0.0
-    sell_score = 0.0
-
-    # ── Stochastic RSI
-    if pd.notna(stoch_k):
-        if stoch_k < OVERSOLD_THRESHOLD:
-            reasons.append(f"Stoch RSI oversold ({stoch_k:.1f})")
-            buy_score += 0.4
-        elif stoch_k > OVERBOUGHT_THRESHOLD:
-            reasons.append(f"Stoch RSI overbought ({stoch_k:.1f})")
-            sell_score += 0.4
-        if pd.notna(stoch_d):
-            pk = prev.get("stoch_rsi_k", np.nan)
-            pd_ = prev.get("stoch_rsi_d", np.nan)
-            if pd.notna(pk) and pd.notna(pd_):
-                if stoch_k > stoch_d and pk <= pd_:
-                    reasons.append("Bullish crossover")
-                    buy_score += 0.2
-                elif stoch_k < stoch_d and pk >= pd_:
-                    reasons.append("Bearish crossover")
-                    sell_score += 0.2
-
-    # ── RSI
-    if pd.notna(rsi_val):
-        if rsi_val < 30:
-            reasons.append(f"RSI oversold ({rsi_val:.1f})")
-            buy_score += 0.15
-        elif rsi_val > 70:
-            reasons.append(f"RSI overbought ({rsi_val:.1f})")
-            sell_score += 0.15
-
-    # ── MACD
-    macd_trend: Optional[str] = None
-    macd_div_str: Optional[str] = None
-    if pd.notna(macd_line) and pd.notna(macd_signal_val):
-        pm = prev.get("macd_line", np.nan)
-        ps = prev.get("macd_signal", np.nan)
-        if pd.notna(pm) and pd.notna(ps):
-            if macd_line > macd_signal_val and pm <= ps:
-                macd_trend = "golden_cross"
-                reasons.append("MACD golden cross")
-                buy_score += 0.3
-            elif macd_line < macd_signal_val and pm >= ps:
-                macd_trend = "dead_cross"
-                reasons.append("MACD dead cross")
-                sell_score += 0.3
-    if pd.notna(macd_div_val):
-        if macd_div_val == 1:
-            macd_div_str = "bullish"
-            buy_score += 0.2
-        elif macd_div_val == -1:
-            macd_div_str = "bearish"
-            sell_score += 0.2
-
-    # ── Smart Money
-    if pd.notna(smi_val):
-        if smi_val > SMI_BULLISH_THRESHOLD:
-            reasons.append(f"Smart money accumulating (SMI={smi_val:.2f})")
-            buy_score += 0.3
-        elif smi_val < -0.5:
-            reasons.append(f"Smart money distributing (SMI={smi_val:.2f})")
-            sell_score += 0.3
-
-    # ── Bandar
-    if pd.notna(bandar):
-        if bandar > 3:
-            reasons.append(f"Bandar buying (score={bandar:.1f})")
-            buy_score += 0.25
-        elif bandar < -3:
-            reasons.append(f"Bandar selling (score={bandar:.1f})")
-            sell_score += 0.25
-
-    # ── OBV
-    obv_label: Optional[str] = None
-    if pd.notna(obv_mom):
-        if obv_mom > 0:
-            obv_label = "INFLOW"
-            buy_score += 0.15
-        elif obv_mom < 0:
-            obv_label = "OUTFLOW"
-            sell_score += 0.15
-
-    # ── ROC
-    if pd.notna(roc_12):
-        if roc_12 > 5:
-            buy_score += 0.10
-        elif roc_12 < -5:
-            sell_score += 0.10
-
-    # ── Bollinger
-    bb_pos: Optional[str] = None
-    if pd.notna(bb_upper) and pd.notna(bb_lower):
-        if price < float(bb_lower):
-            bb_pos = "BELOW"
-            buy_score += 0.10
-        elif price > float(bb_upper):
-            bb_pos = "ABOVE"
-            sell_score += 0.10
-        else:
-            bb_pos = "INSIDE"
-
-    # ── Action
-    action = "HOLD"
-    confidence = 0.5
-    if buy_score > sell_score and buy_score >= 0.4:
-        action = "BUY"
-        confidence = min(1.0, buy_score)
-    elif sell_score > buy_score and sell_score >= 0.4:
-        action = "SELL"
-        confidence = min(1.0, sell_score)
-
-    # ── TP / SL
-    tp: Optional[float] = None
-    sl: Optional[float] = None
-    if action == "BUY" and pd.notna(atr_val):
-        atr_f = float(atr_val)
-        tp = float(min(float(resistance_20) * 0.98, price + 2.5 * atr_f)) if pd.notna(resistance_20) else price + 2.5 * atr_f
-        sl = float(max(float(support_20) * 0.97, price - 1.5 * atr_f)) if pd.notna(support_20) else price - 1.5 * atr_f
-
-    reason_str = " | ".join(reasons) if reasons else "No strong signal"
-
-    return TimingSignal(
-        ticker=ticker, action=action, confidence=confidence,
-        horizon="neutral", reason=reason_str,
-        stoch_rsi_k=float(stoch_k) if pd.notna(stoch_k) else None,
-        stoch_rsi_d=float(stoch_d) if pd.notna(stoch_d) else None,
-        rsi=float(rsi_val) if pd.notna(rsi_val) else None,
-        smi=float(smi_val) if pd.notna(smi_val) else None,
-        macd_trend=macd_trend,
-        macd_divergence=macd_div_str,
-        roc_12=float(roc_12) if pd.notna(roc_12) else None,
-        bandar_score=float(bandar) if pd.notna(bandar) else None,
-        obv_momentum=obv_label,
-        support_20=float(support_20) if pd.notna(support_20) else None,
-        resistance_20=float(resistance_20) if pd.notna(resistance_20) else None,
-        pivot=float(pivot) if pd.notna(pivot) else None,
-        pivot_s1=float(s1) if pd.notna(s1) else None,
-        pivot_r1=float(r1) if pd.notna(r1) else None,
-        atr=float(atr_val) if pd.notna(atr_val) else None,
-        vwap=float(vwap_val) if pd.notna(vwap_val) else None,
-        bb_position=bb_pos,
-        pbv=None, per=None, per_forward=None,
-        roe=None, roa=None, roic=None,
-        eps=None, eps_growth=None,
-        free_cashflow=None, operating_cashflow=None,
-        revenue=None, debt_to_equity=None, current_ratio=None,
-        gross_margins=None, profit_margins=None, dividend_yield=None,
-        free_float_ratio=None, market_cap=None,
-        valuation_label="unknown",
-        sector=None, industry=None,
-        book_value_per_share=None, valuation_price=None,
-        price_vs_valuation=None,
-        company_name=None, major_holders=None,
-        take_profit=tp, stop_loss=sl,
-        price=price,
-        timestamp=latest.name.isoformat() if hasattr(latest.name, "isoformat") else str(latest.name),
-    )
+    return sorted(signals, key=lambda x: (x.action != "HOLD", -x.confidence)), rt_prices, rt_source_label
 
 
 def get_all_signals_bulk(
@@ -797,37 +663,23 @@ def get_all_signals_bulk(
     bypass_cache: bool = False,
     return_data: bool = False,
 ) -> tuple:
-    """
-    Bulk-fetch OHLCV data for all tickers using yf.download(), then compute
-    TA-only signals (no fundamentals). Much faster for 800+ stocks.
-
-    Returns:
-        (signals_list, rt_prices_dict, rt_source_label)
-    """
+    from data_fetcher import fetch_multiple_stocks_bulk
     data = fetch_multiple_stocks_bulk(
-        tickers=tickers,
-        period=period,
-        interval=interval,
-        progress_callback=progress_callback,
-        bypass_cache=bypass_cache,
+        tickers=tickers, period=period, interval=interval,
+        progress_callback=progress_callback, bypass_cache=bypass_cache,
     )
 
-    # Fetch real-time prices for all tickers in one batch
-    rt_prices: dict[str, float] = {}
-    rt_source_label = ""
+    rt_prices, rt_source_label = {}, ""
     try:
         rt_prices, rt_source_label = fetch_realtime_prices(list(data.keys()))
     except Exception:
-        rt_prices = {}
-        rt_source_label = ""
+        pass
 
     signals = []
     for ticker, df in data.items():
-        # Inject real-time price into the last candle
         if ticker in rt_prices:
             df = update_last_candle_with_realtime(df, rt_prices[ticker])
-        sig = analyze_ta_only(df, ticker)
-        signals.append(sig)
+        signals.append(analyze_ta_only(df, ticker))
 
     sorted_signals = sorted(signals, key=lambda x: (x.action != "HOLD", -x.confidence))
     if return_data:
