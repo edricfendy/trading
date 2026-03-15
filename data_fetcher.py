@@ -110,14 +110,35 @@ def clear_cache() -> None:
 
 # ─── Normalize columns ─────────────────────────────────────────────────────────
 def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize any OHLCV DataFrame to standard lowercase columns.
+    Only drops rows where ALL of open/high/low/close are NaN (not just close),
+    so a partial last candle with a real close price is preserved.
+    """
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.copy()
-    df.columns = [str(c).lower() for c in df.columns]
+    # Flatten MultiIndex columns if present (can happen from yf.download single ticker)
+    if isinstance(df.columns, pd.MultiIndex):
+        # Take the first level if it contains OHLCV names, else the second
+        l0 = [str(c).lower() for c in df.columns.get_level_values(0)]
+        if any(c in ("open", "close", "high", "low") for c in l0):
+            df.columns = l0
+        else:
+            df.columns = [str(c).lower() for c in df.columns.get_level_values(1)]
+    else:
+        df.columns = [str(c).lower() for c in df.columns]
+
     keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
     if len(keep) < 4:
         return pd.DataFrame()
-    return df[keep].dropna(subset=["close"])
+    df = df[keep]
+    # Only drop rows where close AND open are both NaN (preserve partial candles)
+    df = df[df["close"].notna() | df["open"].notna()]
+    # Forward-fill a missing close from open as last resort
+    if "close" in df.columns:
+        df["close"] = df["close"].fillna(df["open"])
+    return df.dropna(subset=["close"])
 
 
 # ─── Period helpers ────────────────────────────────────────────────────────────
@@ -170,27 +191,40 @@ def _bulk_yfinance(
             if raw is None or raw.empty:
                 break
 
-            # ── Single ticker: columns are just OHLCV ─────────────────
+            # ── Single ticker: flat OHLCV columns ─────────────────────
             if len(tickers) == 1:
                 ticker = tickers[0]
                 df = _normalize_ohlcv(raw)
                 if not df.empty:
                     results[ticker] = df
             else:
-                # ── Multi-ticker: columns are MultiIndex (field, ticker) ─
-                for ticker in tickers:
-                    try:
-                        if ticker in raw.columns.get_level_values(1):
-                            df = raw.xs(ticker, axis=1, level=1)
-                        elif ticker in raw.columns.get_level_values(0):
-                            df = raw[ticker]
-                        else:
+                # ── Multi-ticker MultiIndex ─────────────────────────────
+                # group_by='ticker' → level-0=ticker, level-1=field  (new yfinance)
+                # older yfinance   → level-0=field,  level-1=ticker
+                if isinstance(raw.columns, pd.MultiIndex):
+                    l0 = list(raw.columns.get_level_values(0).unique())
+                    ohlcv_fields = {"open","high","low","close","volume",
+                                    "Open","High","Low","Close","Volume"}
+                    l0_is_fields = all(str(c) in ohlcv_fields for c in l0 if c)
+                    ticker_level = 1 if l0_is_fields else 0
+                    for ticker in tickers:
+                        try:
+                            df = raw.xs(ticker, axis=1, level=ticker_level)
+                            df = _normalize_ohlcv(df)
+                            if not df.empty:
+                                results[ticker] = df
+                        except Exception:
                             continue
-                        df = _normalize_ohlcv(df)
-                        if not df.empty:
-                            results[ticker] = df
-                    except Exception:
-                        continue
+                else:
+                    # Flat fallback
+                    df = _normalize_ohlcv(raw)
+                    if not df.empty and tickers:
+                        results[tickers[0]] = df
+
+            # Per-ticker fallback for any ticker bulk missed
+            missed = [t for t in tickers if t not in results]
+            if missed:
+                results.update(_per_ticker_yfinance(missed, period, yf_interval))
             break  # success
 
         except Exception:
@@ -614,9 +648,41 @@ def fetch_stock_data(
     period: Optional[str] = None,
     interval: str = "1d",
 ) -> pd.DataFrame:
-    """Convenience wrapper: fetch single ticker."""
+    """
+    Convenience wrapper: fetch single ticker.
+    Tries bulk path first, then falls back to yf.Ticker().history() directly
+    so that valid tickers like ANTM.JK never silently return empty.
+    """
     result = fetch_ohlcv([ticker], period, interval)
-    return result.get(ticker, pd.DataFrame())
+    df = result.get(ticker, pd.DataFrame())
+    if not df.empty:
+        return df
+
+    # Direct fallback — bypass bulk download entirely
+    if DATA_PROVIDER == "yfinance":
+        resolved = _resolve_period(period, interval)
+        yf_interval_map = {
+            "1m":"1m","2m":"2m","5m":"5m","15m":"15m","30m":"30m",
+            "60m":"60m","90m":"90m","1h":"1h","1d":"1d","1wk":"1wk","1mo":"1mo",
+        }
+        yf_int = yf_interval_map.get(interval, "1d")
+        for attempt in range(YF_MAX_RETRIES + 1):
+            try:
+                t = yf.Ticker(ticker)
+                df = t.history(period=resolved, interval=yf_int,
+                               auto_adjust=True, progress=False, prepost=False)
+                df = _normalize_ohlcv(df)
+                if not df.empty:
+                    # Store in cache for subsequent calls
+                    key = _make_key("ohlcv", sorted([ticker]), period, interval)
+                    _cache_set(key, {ticker: df})
+                    return df
+            except Exception:
+                pass
+            if attempt < YF_MAX_RETRIES:
+                time.sleep(YF_RETRY_BACKOFF_SEC * (2 ** attempt))
+
+    return pd.DataFrame()
 
 
 def fetch_realtime_prices(tickers: list[str]) -> tuple[dict[str, float], str]:
