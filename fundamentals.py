@@ -4,14 +4,59 @@ Optimizations vs original:
 - In-process LRU cache (default 30-min TTL) — yfinance .info is ~1-2 s per ticker
 - Parallel batch fetching via ThreadPoolExecutor
 - Graceful degradation: returns empty snapshot on any error
+
+Valuation Price Fix:
+  OLD (wrong): valuation_price = trailingPE × EPS  →  always equals current price (tautology)
+  NEW (correct): valuation_price = BENCHMARK_PER(sector) × EPS(TTM)
+  where BENCHMARK_PER is the IDX sector-average fair P/E multiple, NOT the stock's own P/E.
+  This gives a true fair-value estimate independent of the current price.
+  CHEAP  = current price < valuation_price  (stock trades below fair value)
+  EXPENSIVE = current price > valuation_price
 """
 from __future__ import annotations
 
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+
+
+# ─── IDX Sector Benchmark PER multiples ────────────────────────────────────────
+# Source: IDX/BEI historical average P/E per sector (conservative mid-cycle values)
+# Used as the "fair" multiple when computing Valuation Price = Benchmark_PER × EPS(TTM)
+IDX_SECTOR_BENCHMARK_PER: dict[str, float] = {
+    "Financial Services":       12.0,   # Banks, insurance — typically 10-15x on IDX
+    "Technology":               22.0,   # High-growth premium
+    "Consumer Cyclical":        18.0,   # Retail, auto
+    "Consumer Defensive":       20.0,   # FMCG, food & bev (Unilever, ICBP etc.)
+    "Basic Materials":          10.0,   # Mining, metals — commodity-linked, lower multiples
+    "Energy":                    9.0,   # Coal, oil & gas
+    "Industrials":              14.0,   # Manufacturing, construction
+    "Healthcare":               22.0,   # Pharma, hospitals
+    "Real Estate":              12.0,   # Property — IDX developers trade lower
+    "Communication Services":   17.0,   # Telco, media
+    "Utilities":                13.0,   # Power, gas distribution
+    # Fallback for unknown / unclassified sectors
+    "Unknown":                  15.0,
+}
+
+DEFAULT_BENCHMARK_PER = 15.0  # IDX market-wide historical average
+
+
+def get_benchmark_per(sector: Optional[str], roe: Optional[float] = None) -> float:
+    """
+    Return the fair P/E benchmark for a sector.
+    Applies a quality premium (+2x) for high-ROE stocks (ROE > 20%)
+    and a discount (-2x) for low-ROE stocks (ROE < 8%).
+    """
+    base = IDX_SECTOR_BENCHMARK_PER.get(sector or "Unknown", DEFAULT_BENCHMARK_PER)
+    if roe is not None:
+        if roe > 0.20:
+            base += 2.0   # quality premium
+        elif roe < 0.08:
+            base -= 2.0   # quality discount
+    return max(base, 3.0)  # floor at 3x to avoid nonsense
 
 try:
     import yfinance as yf
@@ -34,7 +79,10 @@ class FundamentalSnapshot:
     per_forward: Optional[float] = None
     peg_ratio: Optional[float] = None
     book_value_per_share: Optional[float] = None
+    # Fair value = BENCHMARK_PER(sector) × EPS(TTM)  — NOT current PER × EPS
     valuation_price: Optional[float] = None
+    benchmark_per: Optional[float] = None        # the sector PER used in valuation_price
+    valuation_method: str = ""                   # human-readable label for the UI
     # Profitability
     revenue: Optional[float] = None
     gross_margins: Optional[float] = None
@@ -98,9 +146,26 @@ def _build_snapshot(info: dict, t) -> FundamentalSnapshot:
     """Construct a FundamentalSnapshot from yfinance info dict."""
     per = info.get("trailingPE")
     eps = info.get("trailingEps")
-    valuation_price: Optional[float] = None
-    if per is not None and eps is not None and eps > 0:
-        valuation_price = per * eps
+
+    # ── Sector ────────────────────────────────────────────────────────────────
+    sector   = info.get("sector") or info.get("sectorDisp")
+    industry = info.get("industry") or info.get("industryDisp")
+    roe_raw  = info.get("returnOnEquity")  # needed for quality adj before full build
+
+    # ── Valuation Price  =  Benchmark_PER(sector) × EPS(TTM) ─────────────────
+    # This is the CORRECT fair-value estimate.
+    # Using the stock's own trailingPE would give: (price/eps) × eps = price
+    # which is a tautology and always equals the current price.
+    # Instead we use the IDX sector-average fair multiple as the benchmark.
+    valuation_price:  Optional[float] = None
+    benchmark_per:    Optional[float] = None
+    valuation_method: str             = ""
+
+    if eps is not None and eps > 0:
+        bm_per = get_benchmark_per(sector, roe_raw)
+        valuation_price  = round(bm_per * eps, 2)
+        benchmark_per    = bm_per
+        valuation_method = f"Benchmark PER {bm_per:.1f}x × EPS {eps:,.0f}"
 
     ebit = info.get("ebit")
     tax_rate = info.get("effectiveTaxRate") or 0.22
@@ -131,6 +196,8 @@ def _build_snapshot(info: dict, t) -> FundamentalSnapshot:
         peg_ratio=info.get("pegRatio") or info.get("trailingPegRatio"),
         book_value_per_share=info.get("bookValue"),
         valuation_price=valuation_price,
+        benchmark_per=benchmark_per,
+        valuation_method=valuation_method,
         revenue=info.get("totalRevenue"),
         gross_margins=info.get("grossMargins"),
         operating_margins=info.get("operatingMargins"),
@@ -154,8 +221,8 @@ def _build_snapshot(info: dict, t) -> FundamentalSnapshot:
         market_cap=info.get("marketCap"),
         enterprise_value=info.get("enterpriseValue"),
         dividend_yield=info.get("dividendYield"),
-        sector=info.get("sector") or info.get("sectorDisp"),
-        industry=info.get("industry") or info.get("industryDisp"),
+        sector=sector,
+        industry=industry,
         company_name=info.get("longName") or info.get("shortName") or "",
         major_holders=_fetch_ownership(t),
     )
