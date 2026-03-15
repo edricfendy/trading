@@ -131,7 +131,9 @@ def run_signals(ticker_tuple, interval, refresh_token, force_refresh):
 
 @st.cache_data(ttl=600, show_spinner=False)      # 10-min cache
 def run_single_ticker_analysis(ticker, interval, refresh_token):
-    """Full analysis with fundamentals for a single selected ticker."""
+    """Full analysis with fundamentals for a single selected ticker.
+    Note: ticker is part of the cache key, so switching tickers always runs fresh.
+    """
     df = fetch_stock_data(ticker, period=None, interval=interval)
     if df is None or df.empty:
         return None, None, ""
