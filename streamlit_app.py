@@ -14,6 +14,7 @@ import pandas as pd
 import time
 import warnings
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -27,6 +28,7 @@ from data_fetcher import (
 )
 from universe import get_universe
 from sentiment import fetch_ticker_sentiment, fetch_sector_sentiment, sentiment_summary
+from fundamentals import fetch_fundamentals
 
 st.set_page_config(
     page_title="Indonesia Stock Trading AI",
@@ -69,6 +71,14 @@ with st.sidebar:
         min_value=10, max_value=500,
         value=50, step=10,
         help="Higher = more comprehensive but slower.",
+    )
+    enable_sector_enrichment = st.checkbox(
+        "Real sector enrichment (slower)",
+        value=True,
+        help=(
+            "Fetch sector/industry from fundamentals for each scanned ticker. "
+            "Enables real grouping in Sector Overview."
+        ),
     )
     min_rebound = st.slider("Rebound Min Score", 20, 80, 40)
 
@@ -157,6 +167,40 @@ def run_sentiment_ticker(ticker, company_name):
 def run_sentiment_sector(sector):
     return fetch_sector_sentiment(sector, max_items=10)
 
+@st.cache_data(ttl=21600, show_spinner=False)  # 6 h cache
+def run_sector_enrichment(ticker_tuple, refresh_token, force_refresh):
+    """
+    Fetch sector/industry/company name from fundamentals for each ticker.
+    This is intentionally slower than TA-only scan, but cached.
+    """
+    tickers = list(ticker_tuple)
+    if not tickers:
+        return {}
+
+    def _fetch_one(ticker: str):
+        try:
+            f = fetch_fundamentals(ticker)
+            sector = (f.sector or "").strip() or None
+            industry = (f.industry or "").strip() or None
+            company_name = (f.company_name or "").strip() or None
+            return ticker, sector, industry, company_name
+        except Exception:
+            return ticker, None, None, None
+
+    results = {}
+    max_workers = min(12, max(1, len(tickers)))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_fetch_one, t) for t in tickers]
+        for fut in as_completed(futs):
+            ticker, sector, industry, company_name = fut.result()
+            results[ticker] = {
+                "sector": sector,
+                "industry": industry,
+                "company_name": company_name,
+            }
+
+    return results
+
 
 # ─── Run bulk scan ────────────────────────────────────────────────────────────
 refresh_token = st.session_state.get("refresh_token", 0.0)
@@ -180,6 +224,30 @@ try:
     rebounds = screen_rebound_candidates(
         min_score=min_rebound, rt_prices=rt_prices, data=bulk_data
     )
+
+    # Optional slower pass: enrich sector/industry so Tab 2 can group by real sector.
+    if enable_sector_enrichment:
+        with st.spinner("⏳ Enriching sector/industry data (slower pass)…"):
+            sector_meta = run_sector_enrichment(
+                tuple(tickers),
+                refresh_token,
+                force_refresh,
+            )
+        enriched_sector_count = 0
+        for s in signals:
+            meta = sector_meta.get(s.ticker, {})
+            if not s.sector and meta.get("sector"):
+                s.sector = meta["sector"]
+            if not s.industry and meta.get("industry"):
+                s.industry = meta["industry"]
+            if not s.company_name and meta.get("company_name"):
+                s.company_name = meta["company_name"]
+            if s.sector:
+                enriched_sector_count += 1
+        st.caption(
+            f"🗂️ Sector enrichment: {enriched_sector_count}/{len(signals)} tickers have sector data."
+        )
+
     if force_refresh:
         st.session_state["force_refresh"] = False
 
