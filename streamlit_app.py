@@ -525,13 +525,24 @@ with tab2:
     st.header("🗂️ Sector Overview")
 
     all_sectors = sorted(set(s.sector for s in signals if s.sector))
-    if not all_sectors:
-        all_sectors = ["Financial Services","Technology","Consumer Cyclical",
-                       "Basic Materials","Energy","Industrials",
-                       "Consumer Defensive","Healthcare","Real Estate",
-                       "Communication Services","Utilities"]
-
-    selected_sector = st.selectbox("Select Sector", options=all_sectors, index=0)
+    selected_sector = None
+    if all_sectors:
+        selected_sector = st.selectbox(
+            "Select Sector",
+            options=all_sectors,
+            index=0,
+            placeholder="Choose a sector...",
+        )
+    else:
+        st.warning(
+            "Sector data is not available in this fast bulk scan. "
+            "Current mode runs TA-only analysis and does not fetch fundamentals "
+            "(sector/industry)."
+        )
+        st.caption(
+            "Tip: Use ticker deep-dive in Tab 1 for full fundamentals, or switch "
+            "to a slower full-fundamental scan mode if you add one."
+        )
 
     if selected_sector:
         sector_signals = [s for s in signals if s.sector == selected_sector]
